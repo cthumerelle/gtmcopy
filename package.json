@@ -1,0 +1,33 @@
+{
+  "name": "gtmcopy",
+  "version": "1.0.0",
+  "description": "Google Tag Manager Config Copy Application",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "client": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.1",
+    "express": "^4.18.2",
+    "express-session": "^1.18.0",
+    "googleapis": "^131.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "pinia": "^2.1.7",
+    "vue": "^3.3.8",
+    "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.5.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.3.5",
+    "vite": "^5.0.0",
+    "vite-plugin-pwa": "^0.16.7"
+  }
+}
