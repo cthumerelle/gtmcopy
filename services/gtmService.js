@@ -3,6 +3,107 @@ import * as googleAuth from './googleAuth.js';
 import { getCopyHistory, addCopyHistory, getCopyDetail } from './storageService.js';
 
 /**
+ * Template mapping utility functions
+ */
+
+/**
+ * Check if a type is a custom template type
+ * @param {string} type - Element type to check
+ * @returns {boolean} - True if it's a custom template type
+ */
+const isCustomTemplateType = (type) => {
+  return type && type.startsWith('cvt_');
+};
+
+/**
+ * Extract template ID from a custom template type
+ * @param {string} cvtType - Type like "cvt_204700869_8"
+ * @returns {string|null} - Template ID like "8" or null if not a cvt type
+ */
+const getTemplateIdFromType = (cvtType) => {
+  if (!isCustomTemplateType(cvtType)) return null;
+  const parts = cvtType.split('_');
+  return parts.length >= 3 ? parts[2] : null;
+};
+
+/**
+ * Get template name from template ID using a template list
+ * @param {string} templateId - Template ID
+ * @param {Array} templateList - List of templates with templateId and name
+ * @returns {string|null} - Template name or null if not found
+ */
+const getTemplateNameFromId = (templateId, templateList) => {
+  const template = templateList.find(t => t.templateId === templateId);
+  return template ? template.name : null;
+};
+
+/**
+ * Build template mapping from source templates to destination templates
+ * @param {Array} sourceTemplates - Source templates
+ * @param {Array} destTemplates - Destination templates  
+ * @returns {Object} - Map of template name to destination template ID
+ */
+const buildTemplateMap = (sourceTemplates, destTemplates) => {
+  const templateMap = {};
+  
+  sourceTemplates.forEach(sourceTemplate => {
+    const destTemplate = destTemplates.find(dest => dest.name === sourceTemplate.name);
+    if (destTemplate) {
+      templateMap[sourceTemplate.name] = destTemplate.templateId;
+    }
+  });
+  
+  return templateMap;
+};
+
+/**
+ * Map a custom template type from source to destination
+ * @param {string} oldType - Original type like "cvt_204700869_8"
+ * @param {Object} templateMap - Map of template name to new template ID
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @param {string} containerId - Destination container ID
+ * @returns {string} - Mapped type like "cvt_204699265_12" or original type
+ */
+const mapTemplateType = (oldType, templateMap, sourceTemplates, containerId) => {
+  if (!isCustomTemplateType(oldType)) return oldType;
+  
+  const templateId = getTemplateIdFromType(oldType);
+  if (!templateId) return oldType;
+  
+  const templateName = getTemplateNameFromId(templateId, sourceTemplates);
+  if (!templateName) return oldType;
+  
+  const newTemplateId = templateMap[templateName];
+  if (!newTemplateId) {
+    throw new Error(`Template "${templateName}" not found in destination container. Please include this template in your copy operation.`);
+  }
+  
+  return `cvt_${containerId}_${newTemplateId}`;
+};
+
+/**
+ * Detect template dependencies in a list of elements
+ * @param {Array} elements - List of elements to analyze
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @returns {Array} - List of required template names
+ */
+const detectTemplateDependencies = (elements, sourceTemplates) => {
+  const requiredTemplates = new Set();
+  
+  elements.forEach(element => {
+    if (isCustomTemplateType(element.type)) {
+      const templateId = getTemplateIdFromType(element.type);
+      const templateName = getTemplateNameFromId(templateId, sourceTemplates);
+      if (templateName) {
+        requiredTemplates.add(templateName);
+      }
+    }
+  });
+  
+  return Array.from(requiredTemplates);
+};
+
+/**
  * Get Tag Manager API client for a user
  * @param {string} googleUserId - Google user ID
  * @returns {Object} - Authenticated TagManager client
@@ -454,9 +555,12 @@ const copyTrigger = async (googleUserId, trigger, targetPath) => {
  * @param {string} googleUserId - Google user ID
  * @param {Object} tag - Tag to copy
  * @param {string} targetPath - Target workspace path
+ * @param {Object} templateMap - Map of template names to destination template IDs
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @param {string} containerId - Destination container ID
  * @returns {Object} - Created or updated tag
  */
-const copyTag = async (googleUserId, tag, targetPath) => {
+const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTemplates = [], containerId = null) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
     
@@ -468,10 +572,22 @@ const copyTag = async (googleUserId, tag, targetPath) => {
     const existingTags = existingTagsResponse.data.tag || [];
     const existingTag = existingTags.find(t => t.name === tag.name);
     
+    // Map template type if it's a custom template type
+    let mappedType = tag.type;
+    if (isCustomTemplateType(tag.type) && templateMap && sourceTemplates && containerId) {
+      try {
+        mappedType = mapTemplateType(tag.type, templateMap, sourceTemplates, containerId);
+        console.log(`Mapped tag type from ${tag.type} to ${mappedType}`);
+      } catch (error) {
+        console.error(`Error mapping template type for tag ${tag.name}:`, error);
+        throw error;
+      }
+    }
+    
     // Create a clean copy with only the required fields to avoid ID conflicts
     const tagCopy = {
       name: tag.name,
-      type: tag.type
+      type: mappedType
     };
     
     // Include other important fields that don't have ID conflicts
@@ -523,9 +639,12 @@ const copyTag = async (googleUserId, tag, targetPath) => {
  * @param {string} googleUserId - Google user ID
  * @param {Object} variable - Variable to copy
  * @param {string} targetPath - Target workspace path
+ * @param {Object} templateMap - Map of template names to destination template IDs
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @param {string} containerId - Destination container ID
  * @returns {Object} - Created or updated variable
  */
-const copyVariable = async (googleUserId, variable, targetPath) => {
+const copyVariable = async (googleUserId, variable, targetPath, templateMap = {}, sourceTemplates = [], containerId = null) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
     
@@ -537,10 +656,22 @@ const copyVariable = async (googleUserId, variable, targetPath) => {
     const existingVariables = existingVariablesResponse.data.variable || [];
     const existingVariable = existingVariables.find(v => v.name === variable.name);
     
+    // Map template type if it's a custom template type
+    let mappedType = variable.type;
+    if (isCustomTemplateType(variable.type) && templateMap && sourceTemplates && containerId) {
+      try {
+        mappedType = mapTemplateType(variable.type, templateMap, sourceTemplates, containerId);
+        console.log(`Mapped variable type from ${variable.type} to ${mappedType}`);
+      } catch (error) {
+        console.error(`Error mapping template type for variable ${variable.name}:`, error);
+        throw error;
+      }
+    }
+    
     // Create a clean copy with only the essential fields to avoid ID conflicts
     const variableCopy = {
       name: variable.name,
-      type: variable.type
+      type: mappedType
     };
     
     // Include other important fields that don't have ID conflicts
@@ -719,6 +850,59 @@ const copyElements = async (
       const copiedElements = [];
       let errors = [];
 
+      // Template mapping phase - get source and destination templates
+      const sourceTemplates = await getCustomTemplates(
+        googleUserId,
+        source.accountId,
+        source.containerId,
+        source.workspaceId
+      );
+      
+      const destTemplates = await getCustomTemplates(
+        googleUserId,
+        target.accountId,
+        target.containerId,
+        tempWorkspace.workspaceId
+      );
+      
+      // Build initial template mapping
+      let templateMap = buildTemplateMap(sourceTemplates, destTemplates);
+      console.log(`Template mapping for container ${target.containerId}:`, templateMap);
+      
+      // Detect template dependencies in elements to copy
+      const requiredTemplates = detectTemplateDependencies(sourceElements, sourceTemplates);
+      console.log(`Required templates:`, requiredTemplates);
+      
+      // Find missing templates that need to be copied first
+      const missingTemplates = requiredTemplates.filter(templateName => !templateMap[templateName]);
+      if (missingTemplates.length > 0) {
+        console.log(`Missing templates to be copied:`, missingTemplates);
+        
+        // Copy missing templates first
+        for (const templateName of missingTemplates) {
+          const sourceTemplate = sourceTemplates.find(t => t.name === templateName);
+          if (sourceTemplate) {
+            try {
+              console.log(`Copying required template: ${templateName}`);
+              const result = await copyTemplate(googleUserId, { ...sourceTemplate, elementType: 'template' }, targetPath);
+              
+              // Update template map with newly created template
+              if (result && result.templateId) {
+                templateMap[templateName] = result.templateId;
+                console.log(`Template "${templateName}" copied with new ID: ${result.templateId}`);
+              }
+            } catch (error) {
+              console.error(`Error copying required template ${templateName}:`, error);
+              errors.push({
+                type: 'template',
+                name: templateName,
+                error: `Failed to copy required template: ${error.message}`
+              });
+            }
+          }
+        }
+      }
+
       // Sort elements to copy in the right dependency order:
       // 1. templates (needed by tags, triggers, and variables)
       // 2. variables (may be needed by triggers and tags)
@@ -743,11 +927,11 @@ const copyElements = async (
           if (element.elementType === 'template') {
             result = await copyTemplate(googleUserId, element, targetPath);
           } else if (element.elementType === 'tag') {
-            result = await copyTag(googleUserId, element, targetPath);
+            result = await copyTag(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
           } else if (element.elementType === 'trigger') {
             result = await copyTrigger(googleUserId, element, targetPath);
           } else if (element.elementType === 'variable') {
-            result = await copyVariable(googleUserId, element, targetPath);
+            result = await copyVariable(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
           }
           
           if (result) {
