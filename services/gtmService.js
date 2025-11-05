@@ -662,7 +662,7 @@ const copyElements = async (
         selectedElements.tags.includes(tag.tagId));
     }
     
-    sourceElements = [...sourceElements, ...selectedTags.map(el => ({ ...el, type: 'tag' }))];
+    sourceElements = [...sourceElements, ...selectedTags.map(el => ({ ...el, elementType: 'tag' }))];
   }
   
   if (elementTypes.includes('triggers')) {
@@ -680,7 +680,7 @@ const copyElements = async (
         selectedElements.triggers.includes(trigger.triggerId));
     }
     
-    sourceElements = [...sourceElements, ...selectedTriggers.map(el => ({ ...el, type: 'trigger' }))];
+    sourceElements = [...sourceElements, ...selectedTriggers.map(el => ({ ...el, elementType: 'trigger' }))];
   }
   
   if (elementTypes.includes('variables')) {
@@ -698,7 +698,7 @@ const copyElements = async (
         selectedElements.variables.includes(variable.variableId));
     }
     
-    sourceElements = [...sourceElements, ...selectedVariables.map(el => ({ ...el, type: 'variable' }))];
+    sourceElements = [...sourceElements, ...selectedVariables.map(el => ({ ...el, elementType: 'variable' }))];
   }
 
   console.log(`Total elements to copy: ${sourceElements.length}`);
@@ -725,10 +725,10 @@ const copyElements = async (
       // 3. triggers (needed by tags)
       // 4. tags (dependent on the above)
       const orderedElements = [
-        ...sourceElements.filter(el => el.type === 'template'),
-        ...sourceElements.filter(el => el.type === 'variable'),
-        ...sourceElements.filter(el => el.type === 'trigger'),
-        ...sourceElements.filter(el => el.type === 'tag')
+        ...sourceElements.filter(el => el.elementType === 'template'),
+        ...sourceElements.filter(el => el.elementType === 'variable'),
+        ...sourceElements.filter(el => el.elementType === 'trigger'),
+        ...sourceElements.filter(el => el.elementType === 'tag')
       ];
 
       console.log(`Copying elements in dependency order. Total elements: ${orderedElements.length}`);
@@ -736,29 +736,29 @@ const copyElements = async (
       // Copy elements
       for (const element of orderedElements) {
         try {
-          console.log(`Copying ${element.type}: ${element.name}`);
+          console.log(`Copying ${element.elementType}: ${element.name}`);
           let result;
           
           // Update or create elements based on their type
-          if (element.type === 'template') {
+          if (element.elementType === 'template') {
             result = await copyTemplate(googleUserId, element, targetPath);
-          } else if (element.type === 'tag') {
+          } else if (element.elementType === 'tag') {
             result = await copyTag(googleUserId, element, targetPath);
-          } else if (element.type === 'trigger') {
+          } else if (element.elementType === 'trigger') {
             result = await copyTrigger(googleUserId, element, targetPath);
-          } else if (element.type === 'variable') {
+          } else if (element.elementType === 'variable') {
             result = await copyVariable(googleUserId, element, targetPath);
           }
           
           if (result) {
             copiedElements.push({
-              type: element.type,
+              type: element.elementType,
               name: element.name,
               status: 'success'
             });
           }
         } catch (error) {
-          console.error(`Error copying ${element.type} ${element.name}:`, error);
+          console.error(`Error copying ${element.elementType} ${element.name}:`, error);
           
           // Provide clearer error messages for common issues
           let errorMessage = error.message;
@@ -771,7 +771,7 @@ const copyElements = async (
           }
           
           errors.push({
-            type: element.type,
+            type: element.elementType,
             name: element.name,
             error: errorMessage
           });
