@@ -1,6 +1,27 @@
 import { google } from 'googleapis';
 import * as googleAuth from './googleAuth.js';
 import { getCopyHistory, addCopyHistory, getCopyDetail } from './storageService.js';
+import rateLimiter from './rateLimiter.js';
+
+/**
+ * Simple cache for templates to avoid redundant API calls
+ */
+const templateCache = new Map();
+const CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes
+
+const getCacheKey = (accountId, containerId, workspaceId) => {
+  return `${accountId}_${containerId}_${workspaceId}`;
+};
+
+const isCacheValid = (cacheEntry) => {
+  return cacheEntry && (Date.now() - cacheEntry.timestamp) < CACHE_EXPIRY;
+};
+
+const invalidateTemplateCache = (accountId, containerId, workspaceId) => {
+  const cacheKey = getCacheKey(accountId, containerId, workspaceId);
+  templateCache.delete(cacheKey);
+  console.log(`Invalidated template cache for container ${containerId}`);
+};
 
 /**
  * Template mapping utility functions
@@ -104,6 +125,123 @@ const detectTemplateDependencies = (elements, sourceTemplates) => {
 };
 
 /**
+ * Trigger mapping utility functions
+ */
+
+/**
+ * Build trigger mapping from source triggers to destination triggers
+ * @param {Array} sourceTriggers - Source triggers
+ * @param {Array} destTriggers - Destination triggers  
+ * @returns {Object} - Map of trigger name to destination trigger ID
+ */
+const buildTriggerMap = (sourceTriggers, destTriggers) => {
+  const triggerMap = {};
+  
+  sourceTriggers.forEach(sourceTrigger => {
+    const destTrigger = destTriggers.find(dest => dest.name === sourceTrigger.name);
+    if (destTrigger) {
+      triggerMap[sourceTrigger.name] = destTrigger.triggerId;
+    }
+  });
+  
+  return triggerMap;
+};
+
+/**
+ * Get trigger name from trigger ID using a trigger list
+ * @param {string} triggerId - Trigger ID
+ * @param {Array} triggerList - List of triggers with triggerId and name
+ * @returns {string|null} - Trigger name or null if not found
+ */
+const getTriggerNameFromId = (triggerId, triggerList) => {
+  const trigger = triggerList.find(t => t.triggerId == triggerId); // Use == instead of === for type coercion
+  return trigger ? trigger.name : null;
+};
+
+/**
+ * Map a trigger ID from source to destination
+ * @param {string} oldTriggerId - Original trigger ID
+ * @param {Object} triggerMap - Map of trigger name to new trigger ID
+ * @param {Array} sourceTriggers - Source triggers for name lookup
+ * @returns {string|null} - Mapped trigger ID or null if not found
+ */
+const mapTriggerId = (oldTriggerId, triggerMap, sourceTriggers) => {
+  if (!oldTriggerId) return null;
+  
+  const triggerName = getTriggerNameFromId(oldTriggerId, sourceTriggers);
+  if (!triggerName) {
+    console.warn(`Trigger with ID ${oldTriggerId} not found in source triggers`);
+    return null;
+  }
+  
+  const newTriggerId = triggerMap[triggerName];
+  if (!newTriggerId) {
+    console.warn(`Trigger "${triggerName}" not found in destination container`);
+    return null;
+  }
+  
+  return newTriggerId;
+};
+
+/**
+ * Map trigger references in a tag object
+ * @param {Object} tagCopy - Tag object to modify
+ * @param {Object} triggerMap - Map of trigger name to destination trigger ID
+ * @param {Array} sourceTriggers - Source triggers for name lookup
+ */
+const mapTriggerReferences = (tagCopy, triggerMap, sourceTriggers) => {
+  // Map enabling triggers
+  if (tagCopy.enablingTriggerId && Array.isArray(tagCopy.enablingTriggerId)) {
+    tagCopy.enablingTriggerId = tagCopy.enablingTriggerId.map(triggerId => {
+      const mappedId = mapTriggerId(triggerId, triggerMap, sourceTriggers);
+      if (mappedId) {
+        const triggerName = getTriggerNameFromId(triggerId, sourceTriggers);
+        console.log(`Mapped enabling trigger "${triggerName}" from ${triggerId} to ${mappedId}`);
+        return mappedId;
+      }
+      return null; // Will be filtered out
+    }).filter(id => id !== null);
+  }
+  
+  // Map disabling triggers
+  if (tagCopy.disablingTriggerId && Array.isArray(tagCopy.disablingTriggerId)) {
+    tagCopy.disablingTriggerId = tagCopy.disablingTriggerId.map(triggerId => {
+      const mappedId = mapTriggerId(triggerId, triggerMap, sourceTriggers);
+      if (mappedId) {
+        const triggerName = getTriggerNameFromId(triggerId, sourceTriggers);
+        console.log(`Mapped disabling trigger "${triggerName}" from ${triggerId} to ${mappedId}`);
+        return mappedId;
+      }
+      return null; // Will be filtered out
+    }).filter(id => id !== null);
+  }
+  
+  // Map legacy firing triggers (single ID)
+  if (tagCopy.firingTriggerId) {
+    const mappedId = mapTriggerId(tagCopy.firingTriggerId, triggerMap, sourceTriggers);
+    if (mappedId) {
+      const triggerName = getTriggerNameFromId(tagCopy.firingTriggerId, sourceTriggers);
+      console.log(`Mapped firing trigger "${triggerName}" from ${tagCopy.firingTriggerId} to ${mappedId}`);
+      tagCopy.firingTriggerId = mappedId;
+    } else {
+      delete tagCopy.firingTriggerId; // Remove invalid reference
+    }
+  }
+  
+  // Map legacy blocking triggers (single ID)
+  if (tagCopy.blockingTriggerId) {
+    const mappedId = mapTriggerId(tagCopy.blockingTriggerId, triggerMap, sourceTriggers);
+    if (mappedId) {
+      const triggerName = getTriggerNameFromId(tagCopy.blockingTriggerId, sourceTriggers);
+      console.log(`Mapped blocking trigger "${triggerName}" from ${tagCopy.blockingTriggerId} to ${mappedId}`);
+      tagCopy.blockingTriggerId = mappedId;
+    } else {
+      delete tagCopy.blockingTriggerId; // Remove invalid reference
+    }
+  }
+};
+
+/**
  * Get Tag Manager API client for a user
  * @param {string} googleUserId - Google user ID
  * @returns {Object} - Authenticated TagManager client
@@ -116,6 +254,16 @@ const getTagManagerClient = async (googleUserId) => {
     console.error('Error getting Tag Manager client:', error);
     throw error;
   }
+};
+
+/**
+ * Make a rate-limited GTM API request
+ * @param {Function} requestFunction - Function that makes the API request
+ * @param {string} description - Description of the request for logging
+ * @returns {Promise} - Promise that resolves with the request result
+ */
+const makeRateLimitedRequest = async (requestFunction, description) => {
+  return await rateLimiter.enqueue(requestFunction, description);
 };
 
 /**
@@ -183,11 +331,33 @@ const getWorkspaces = async (googleUserId, accountId, containerId) => {
  */
 const getCustomTemplates = async (googleUserId, accountId, containerId, workspaceId) => {
   try {
+    // Check cache first
+    const cacheKey = getCacheKey(accountId, containerId, workspaceId);
+    const cachedEntry = templateCache.get(cacheKey);
+    
+    if (isCacheValid(cachedEntry)) {
+      console.log(`Using cached templates for container ${containerId}`);
+      return cachedEntry.data;
+    }
+    
+    // Cache miss or expired, fetch from API
     const tagmanager = await getTagManagerClient(googleUserId);
-    const response = await tagmanager.accounts.containers.workspaces.templates.list({
-      parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.templates.list({
+        parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get templates for container ${containerId}`
+    );
+    
+    const templates = response.data.template || [];
+    
+    // Cache the result
+    templateCache.set(cacheKey, {
+      data: templates,
+      timestamp: Date.now()
     });
-    return response.data.template || [];
+    
+    return templates;
   } catch (error) {
     console.error('Error fetching custom templates:', error);
     throw error;
@@ -205,9 +375,12 @@ const getCustomTemplates = async (googleUserId, accountId, containerId, workspac
 const getTags = async (googleUserId, accountId, containerId, workspaceId) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
-    const response = await tagmanager.accounts.containers.workspaces.tags.list({
-      parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
-    });
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.tags.list({
+        parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get tags for container ${containerId}`
+    );
     return response.data.tag || [];
   } catch (error) {
     console.error('Error fetching tags:', error);
@@ -226,9 +399,12 @@ const getTags = async (googleUserId, accountId, containerId, workspaceId) => {
 const getTriggers = async (googleUserId, accountId, containerId, workspaceId) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
-    const response = await tagmanager.accounts.containers.workspaces.triggers.list({
-      parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
-    });
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.triggers.list({
+        parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get triggers for container ${containerId}`
+    );
     return response.data.trigger || [];
   } catch (error) {
     console.error('Error fetching triggers:', error);
@@ -247,9 +423,12 @@ const getTriggers = async (googleUserId, accountId, containerId, workspaceId) =>
 const getVariables = async (googleUserId, accountId, containerId, workspaceId) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
-    const response = await tagmanager.accounts.containers.workspaces.variables.list({
-      parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
-    });
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.variables.list({
+        parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get variables for container ${containerId}`
+    );
     return response.data.variable || [];
   } catch (error) {
     console.error('Error fetching variables:', error);
@@ -370,13 +549,29 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
     console.log(`Attempting to publish workspace - Account: ${accountId}, Container: ${containerId}, Workspace: ${workspaceId}`);
     
     // Create a version which effectively publishes the workspace
-    const response = await tagmanager.accounts.containers.workspaces.create_version({
-      path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`,
-      requestBody: {
-        name: `GTM Copy Publish ${new Date().toISOString()}`,
-        notes: 'Published by GTM Copy application'
-      }
-    });
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.create_version({
+        path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`,
+        requestBody: {
+          name: `GTM Copy Publish ${new Date().toISOString()}`,
+          notes: 'Published by GTM Copy application'
+        }
+      }),
+      `Publish workspace in container ${containerId}`
+    );
+    
+    // Check for compiler errors even if API call succeeded
+    if (response.data?.compilerError) {
+      console.error('Publication failed due to compiler errors:', response.data);
+      console.error('This usually means missing dependencies (variables, triggers, templates, etc.)');
+      console.error('The workspace was created but contains compilation errors and is not published to production.');
+      
+      // Return error indication
+      const error = new Error('Publication failed due to compiler errors in workspace');
+      error.compilerError = true;
+      error.responseData = response.data;
+      throw error;
+    }
     
     console.log('Publish success using create_version:', response.data);
     return response.data;
@@ -438,18 +633,33 @@ const copyTemplate = async (googleUserId, template, targetPath) => {
       // We need to include the fingerprint of the existing template for updates
       templateCopy.fingerprint = existingTemplate.fingerprint;
       
-      response = await tagmanager.accounts.containers.workspaces.templates.update({
-        path: `${targetPath}/templates/${existingTemplate.templateId}`,
-        requestBody: templateCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.templates.update({
+          path: `${targetPath}/templates/${existingTemplate.templateId}`,
+          requestBody: templateCopy
+        }),
+        `Update template "${template.name}"`
+      );
       console.log(`Updated template "${template.name}"`);
     } else {
       // Create a new template without any ID fields that might conflict
-      response = await tagmanager.accounts.containers.workspaces.templates.create({
-        parent: targetPath,
-        requestBody: templateCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.templates.create({
+          parent: targetPath,
+          requestBody: templateCopy
+        }),
+        `Create template "${template.name}"`
+      );
       console.log(`Created new template "${template.name}"`);
+    }
+    
+    // Invalidate template cache since we've modified templates
+    const pathParts = targetPath.split('/');
+    if (pathParts.length >= 6) {
+      const accountId = pathParts[1];
+      const containerId = pathParts[3];
+      const workspaceId = pathParts[5];
+      invalidateTemplateCache(accountId, containerId, workspaceId);
     }
     
     return response.data;
@@ -470,13 +680,16 @@ const createTempWorkspace = async (googleUserId, accountId, containerId) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const response = await tagmanager.accounts.containers.workspaces.create({
-      parent: `accounts/${accountId}/containers/${containerId}`,
-      requestBody: {
-        name: `temp-copy-${timestamp}`,
-        description: 'Temporary workspace for GTM Copy application'
-      }
-    });
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.create({
+        parent: `accounts/${accountId}/containers/${containerId}`,
+        requestBody: {
+          name: `temp-copy-${timestamp}`,
+          description: 'Temporary workspace for GTM Copy application'
+        }
+      }),
+      `Create temp workspace in container ${containerId}`
+    );
     return response.data;
   } catch (error) {
     console.error('Error creating temporary workspace:', error);
@@ -558,9 +771,11 @@ const copyTrigger = async (googleUserId, trigger, targetPath) => {
  * @param {Object} templateMap - Map of template names to destination template IDs
  * @param {Array} sourceTemplates - Source templates for name lookup
  * @param {string} containerId - Destination container ID
+ * @param {Object} triggerMap - Map of trigger names to destination trigger IDs
+ * @param {Array} sourceTriggers - Source triggers for name lookup
  * @returns {Object} - Created or updated tag
  */
-const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTemplates = [], containerId = null) => {
+const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTemplates = [], containerId = null, triggerMap = {}, sourceTriggers = []) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
     
@@ -603,6 +818,11 @@ const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTe
     if (tag.priority) tagCopy.priority = tag.priority;
     if (tag.paused) tagCopy.paused = tag.paused;
     
+    // Map trigger references to destination trigger IDs
+    if (triggerMap && sourceTriggers && sourceTriggers.length > 0) {
+      mapTriggerReferences(tagCopy, triggerMap, sourceTriggers);
+    }
+    
     let response;
     
     if (existingTag) {
@@ -613,17 +833,23 @@ const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTe
       const tagPath = `${targetPath}/tags/${existingTag.tagId}`;
       tagCopy.fingerprint = existingTag.fingerprint;
       
-      response = await tagmanager.accounts.containers.workspaces.tags.update({
-        path: tagPath,
-        requestBody: tagCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.tags.update({
+          path: tagPath,
+          requestBody: tagCopy
+        }),
+        `Update tag "${tag.name}"`
+      );
       console.log(`Updated tag "${tag.name}"`);
     } else {
       // Create a new tag
-      response = await tagmanager.accounts.containers.workspaces.tags.create({
-        parent: targetPath,
-        requestBody: tagCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.tags.create({
+          parent: targetPath,
+          requestBody: tagCopy
+        }),
+        `Create tag "${tag.name}"`
+      );
       console.log(`Created new tag "${tag.name}"`);
     }
     
@@ -693,17 +919,23 @@ const copyVariable = async (googleUserId, variable, targetPath, templateMap = {}
       const variablePath = `${targetPath}/variables/${existingVariable.variableId}`;
       variableCopy.fingerprint = existingVariable.fingerprint;
       
-      response = await tagmanager.accounts.containers.workspaces.variables.update({
-        path: variablePath,
-        requestBody: variableCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.variables.update({
+          path: variablePath,
+          requestBody: variableCopy
+        }),
+        `Update variable "${variable.name}"`
+      );
       console.log(`Updated variable "${variable.name}"`);
     } else {
       // Create a new variable
-      response = await tagmanager.accounts.containers.workspaces.variables.create({
-        parent: targetPath,
-        requestBody: variableCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.variables.create({
+          parent: targetPath,
+          requestBody: variableCopy
+        }),
+        `Create variable "${variable.name}"`
+      );
       console.log(`Created new variable "${variable.name}"`);
     }
     
@@ -759,6 +991,14 @@ const copyElements = async (
   console.log('Element types:', elementTypes);
   console.log('Selected elements:', selectedElements);
   
+  // Always get triggers from source workspace for mapping purposes (even if not copying them)
+  const allSourceTriggers = await getTriggers(
+    googleUserId, 
+    source.accountId, 
+    source.containerId, 
+    source.workspaceId
+  );
+  
   // Get elements from source workspace
   if (elementTypes.includes('templates')) {
     const templates = await getCustomTemplates(
@@ -775,7 +1015,7 @@ const copyElements = async (
         selectedElements.templates.includes(template.templateId));
     }
     
-    sourceElements = [...sourceElements, ...selectedTemplates.map(el => ({ ...el, type: 'template' }))];
+    sourceElements = [...sourceElements, ...selectedTemplates.map(el => ({ ...el, elementType: 'template' }))];
   }
   
   if (elementTypes.includes('tags')) {
@@ -797,17 +1037,10 @@ const copyElements = async (
   }
   
   if (elementTypes.includes('triggers')) {
-    const triggers = await getTriggers(
-      googleUserId, 
-      source.accountId, 
-      source.containerId, 
-      source.workspaceId
-    );
-    
-    // Filter triggers if specific selections were provided
-    let selectedTriggers = triggers;
+    // Filter triggers if specific selections were provided (using already fetched triggers)
+    let selectedTriggers = allSourceTriggers;
     if (selectedElements && selectedElements.triggers && selectedElements.triggers.length > 0) {
-      selectedTriggers = triggers.filter(trigger => 
+      selectedTriggers = allSourceTriggers.filter(trigger => 
         selectedElements.triggers.includes(trigger.triggerId));
     }
     
@@ -833,11 +1066,34 @@ const copyElements = async (
   }
 
   console.log(`Total elements to copy: ${sourceElements.length}`);
+  
+  // Calculate estimated time and show progress information
+  const estimatedRequestsPerTarget = sourceElements.length + 10; // Elements + workspace creation, templates fetch, etc.
+  const totalEstimatedRequests = estimatedRequestsPerTarget * targets.length;
+  const estimatedTimeMs = rateLimiter.estimateTime(totalEstimatedRequests);
+  const estimatedMinutes = Math.ceil(estimatedTimeMs / 60000);
+  
+  console.log(`Estimated ${totalEstimatedRequests} API requests for ${targets.length} targets`);
+  console.log(`Estimated completion time: ~${estimatedMinutes} minutes`);
+  
+  const rateLimiterStatus = rateLimiter.getStatus();
+  console.log('Rate limiter status:', {
+    queueLength: rateLimiterStatus.queueLength,
+    requestsInLastMinute: rateLimiterStatus.requestsInLastMinute,
+    canMakeRequest: rateLimiterStatus.canMakeRequest
+  });
 
   // Process each target container
-  for (const target of targets) {
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
     try {
-      console.log(`Starting copy to target container: ${target.containerId}`);
+      console.log(`[${i + 1}/${targets.length}] Starting copy to target container: ${target.containerId}`);
+      
+      // Show current rate limiter status
+      const currentStatus = rateLimiter.getStatus();
+      if (currentStatus.queueLength > 0) {
+        console.log(`Rate limiter queue: ${currentStatus.queueLength} requests pending`);
+      }
       
       // Create temporary workspace in target container
       const tempWorkspace = await createTempWorkspace(
@@ -903,6 +1159,18 @@ const copyElements = async (
         }
       }
 
+      // Trigger mapping phase - get destination triggers (source already fetched)
+      const destTriggers = await getTriggers(
+        googleUserId,
+        target.accountId,
+        target.containerId,
+        tempWorkspace.workspaceId
+      );
+      
+      // Build initial trigger mapping using pre-fetched source triggers
+      let triggerMap = buildTriggerMap(allSourceTriggers, destTriggers);
+      console.log(`Trigger mapping for container ${target.containerId}:`, triggerMap);
+
       // Sort elements to copy in the right dependency order:
       // 1. templates (needed by tags, triggers, and variables)
       // 2. variables (may be needed by triggers and tags)
@@ -918,18 +1186,32 @@ const copyElements = async (
       console.log(`Copying elements in dependency order. Total elements: ${orderedElements.length}`);
       
       // Copy elements
-      for (const element of orderedElements) {
+      for (let j = 0; j < orderedElements.length; j++) {
+        const element = orderedElements[j];
         try {
-          console.log(`Copying ${element.elementType}: ${element.name}`);
+          console.log(`[${i + 1}/${targets.length}] [${j + 1}/${orderedElements.length}] Copying ${element.elementType}: ${element.name}`);
+          
+          // Show rate limiter queue status for long operations
+          const queueStatus = rateLimiter.getStatus();
+          if (queueStatus.queueLength > 5) {
+            console.log(`Rate limiter queue: ${queueStatus.queueLength} requests pending, estimated wait: ${Math.ceil(queueStatus.estimatedWaitTime/1000)}s`);
+          }
+          
           let result;
           
           // Update or create elements based on their type
           if (element.elementType === 'template') {
             result = await copyTemplate(googleUserId, element, targetPath);
           } else if (element.elementType === 'tag') {
-            result = await copyTag(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
+            result = await copyTag(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId, triggerMap, allSourceTriggers);
           } else if (element.elementType === 'trigger') {
             result = await copyTrigger(googleUserId, element, targetPath);
+            
+            // Update trigger map with newly created/updated trigger
+            if (result && result.triggerId && result.name) {
+              triggerMap[result.name] = result.triggerId;
+              console.log(`Updated trigger map: "${result.name}" -> ${result.triggerId}`);
+            }
           } else if (element.elementType === 'variable') {
             result = await copyVariable(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
           }
@@ -982,8 +1264,12 @@ const copyElements = async (
         } catch (error) {
           console.error('Error publishing changes:', error);
           
-          // Provide a clearer error message for permission issues
+          // Provide specific error messages based on error type
           let errorMessage = error.message;
+          
+          if (error.compilerError) {
+            errorMessage = "Publication failed due to compiler errors (missing dependencies: variables, triggers, templates, etc.)";
+          }
           if (error.response && error.response.status === 403) {
             errorMessage = "403 Forbidden: You don't have permission to publish this workspace. This typically means you have 'Edit' access but not 'Publish' access to this container. The elements were copied but you'll need to publish manually through the GTM interface.";
           } else if (error.message.includes("permission") || error.message.includes("Permission")) {
@@ -1100,6 +1386,33 @@ const copyElements = async (
   };
 };
 
+/**
+ * Get rate limiter status for UI progress indicators
+ * @returns {Object} - Rate limiter status and progress information
+ */
+const getRateLimiterStatus = () => {
+  return rateLimiter.getStatus();
+};
+
+/**
+ * Estimate time for a copy operation
+ * @param {number} elementsCount - Number of elements to copy
+ * @param {number} targetsCount - Number of target containers
+ * @returns {Object} - Time estimation information
+ */
+const estimateCopyTime = (elementsCount, targetsCount) => {
+  const requestsPerTarget = elementsCount + 10; // Elements + overhead
+  const totalRequests = requestsPerTarget * targetsCount;
+  const estimatedMs = rateLimiter.estimateTime(totalRequests);
+  
+  return {
+    totalRequests,
+    estimatedMs,
+    estimatedMinutes: Math.ceil(estimatedMs / 60000),
+    requestsPerTarget
+  };
+};
+
 export {
   getAccounts,
   getContainers,
@@ -1111,5 +1424,7 @@ export {
   copyElements,
   getHistory as getCopyHistory,
   getDetails as getCopyDetails,
-  publishWorkspace
+  publishWorkspace,
+  getRateLimiterStatus,
+  estimateCopyTime
 };
