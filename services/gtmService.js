@@ -548,8 +548,8 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
     // Log detailed information about the publish attempt for debugging
     console.log(`Attempting to publish workspace - Account: ${accountId}, Container: ${containerId}, Workspace: ${workspaceId}`);
     
-    // Create a version which effectively publishes the workspace
-    const response = await makeRateLimitedRequest(
+    // Step 1: Create a version from the workspace
+    const versionResponse = await makeRateLimitedRequest(
       () => tagmanager.accounts.containers.workspaces.create_version({
         path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`,
         requestBody: {
@@ -557,24 +557,49 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
           notes: 'Published by GTM Copy application'
         }
       }),
-      `Publish workspace in container ${containerId}`
+      `Create version in container ${containerId}`
     );
     
-    // Check for compiler errors even if API call succeeded
-    if (response.data?.compilerError) {
-      console.error('Publication failed due to compiler errors:', response.data);
+    console.log('Version created successfully:', {
+      versionId: versionResponse.data?.containerVersion?.containerVersionId,
+      name: versionResponse.data?.containerVersion?.name,
+      compilerError: versionResponse.data?.compilerError
+    });
+    
+    // Check for compiler errors
+    if (versionResponse.data?.compilerError) {
+      console.error('Version creation failed due to compiler errors');
       console.error('This usually means missing dependencies (variables, triggers, templates, etc.)');
-      console.error('The workspace was created but contains compilation errors and is not published to production.');
+      console.error('The version was created but contains compilation errors and cannot be published to production.');
       
-      // Return error indication
-      const error = new Error('Publication failed due to compiler errors in workspace');
+      const error = new Error('Version creation failed due to compiler errors');
       error.compilerError = true;
-      error.responseData = response.data;
+      error.responseData = versionResponse.data;
       throw error;
     }
     
-    console.log('Publish success using create_version:', response.data);
-    return response.data;
+    // Step 2: Publish the created version to production
+    const versionId = versionResponse.data?.containerVersion?.containerVersionId;
+    if (!versionId) {
+      throw new Error('No version ID returned from create_version');
+    }
+    
+    console.log(`Publishing version ${versionId} to production...`);
+    const publishResponse = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.versions.publish({
+        path: `accounts/${accountId}/containers/${containerId}/versions/${versionId}`
+      }),
+      `Publish version ${versionId} to production`
+    );
+    
+    console.log('Version published to production successfully');
+    
+    // Return both responses for full information
+    return {
+      version: versionResponse.data,
+      publish: publishResponse.data,
+      published: true
+    };
   } catch (error) {
     console.error('Error publishing workspace:', error);
     
@@ -1268,7 +1293,11 @@ const copyElements = async (
           let errorMessage = error.message;
           
           if (error.compilerError) {
-            errorMessage = "Publication failed due to compiler errors (missing dependencies: variables, triggers, templates, etc.)";
+            errorMessage = "Version created but contains compiler errors (missing dependencies: variables, triggers, templates, etc.). Version not published to production.";
+          } else if (error.message.includes("No version ID returned")) {
+            errorMessage = "Failed to create version from workspace. Check workspace content and permissions.";
+          } else if (error.message.includes("Publish version")) {
+            errorMessage = "Version created successfully but failed to publish to production. Check publish permissions.";
           }
           if (error.response && error.response.status === 403) {
             errorMessage = "403 Forbidden: You don't have permission to publish this workspace. This typically means you have 'Edit' access but not 'Publish' access to this container. The elements were copied but you'll need to publish manually through the GTM interface.";
