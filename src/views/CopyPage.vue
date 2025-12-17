@@ -396,7 +396,7 @@
                     {{ getAccountName(target.accountId) }}
                   </div>
                   <div class="text-sm text-gray-600">
-                    {{ getContainerName(target.accountId, target.containerId) }}
+                    {{ getContainerName(target.containerId) }}
                   </div>
                 </div>
                 <button 
@@ -456,7 +456,7 @@
           <!-- Results summary -->
           <div v-for="(result, index) in copyResults.targets" :key="index" class="mb-6 p-4 bg-gray-50 rounded-md">
             <h4 class="font-medium mb-2 text-gray-800">
-              Target: {{ getContainerName(result.targetContainer.accountId, result.targetContainer.containerId) }}
+              Target: {{ getContainerName(result.targetContainer.containerId) }}
             </h4>
             
             <div v-if="result.status === 'failed'" class="p-3 bg-red-100 text-red-800 rounded-md mb-4">
@@ -486,6 +486,14 @@
                 <span class="text-gray-600">Published:</span>
                 <span class="ml-2 font-medium">{{ result.published ? 'Yes' : 'No' }}</span>
               </p>
+              
+              <div v-if="result.workspacePreserved" class="mt-2 p-3 bg-blue-50 text-blue-800 rounded-md">
+                <p class="text-sm font-medium">🔍 Workspace disponible pour recette</p>
+                <p class="text-xs mt-1">
+                  Le workspace "{{ result.workspace?.name }}" a été créé avec les éléments copiés.
+                  Vous pouvez le consulter dans GTM pour vérification avant publication manuelle.
+                </p>
+              </div>
               
               <div v-if="result.errors && result.errors.length > 0" class="mt-4">
                 <p class="text-sm font-medium text-gray-700 mb-2">Errors:</p>
@@ -519,7 +527,7 @@
                 <h4 class="text-sm text-gray-500 mb-1">Source:</h4>
                 <p class="font-medium">
                   {{ getAccountName(source.accountId) }} / 
-                  {{ getContainerName(source.accountId, source.containerId) }} / 
+                  {{ getContainerName(source.containerId) }} / 
                   {{ getWorkspaceName(source.workspaceId) }}
                 </p>
               </div>
@@ -549,9 +557,31 @@
                 <ul class="pl-5 list-disc">
                   <li v-for="(target, index) in targets" :key="index" class="text-sm">
                     {{ getAccountName(target.accountId) }} / 
-                    {{ getContainerName(target.accountId, target.containerId) }}
+                    {{ getContainerName(target.containerId) }}
                   </li>
                 </ul>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Deployment option -->
+          <div class="mb-6 p-4 bg-blue-50 rounded-md">
+            <div class="flex items-start">
+              <div class="flex items-center h-5">
+                <input 
+                  id="auto-publish" 
+                  type="checkbox"
+                  v-model="autoPublish"
+                  class="checkbox"
+                />
+              </div>
+              <div class="ml-3">
+                <label for="auto-publish" class="font-medium text-blue-800">
+                  Publier automatiquement les workspaces
+                </label>
+                <p class="text-sm text-blue-700 mt-1">
+                  Si décoché, les workspaces seront créés mais non publiés, vous permettant de les vérifier avant publication manuelle.
+                </p>
               </div>
             </div>
           </div>
@@ -562,7 +592,8 @@
             <ul class="pl-5 list-disc text-sm space-y-1">
               <li>This operation will create a temporary workspace in each target container.</li>
               <li>Elements with the same name in the target containers will be overwritten.</li>
-              <li>Changes will be published to the live containers automatically.</li>
+              <li v-if="autoPublish">Changes will be published to the live containers automatically.</li>
+              <li v-else>Workspaces will be created but not published, allowing manual review before going live.</li>
             </ul>
           </div>
           
@@ -577,13 +608,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { ref, computed, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { useGtmStore } from '../store/gtm';
 import api from '../services/api';
 
 const route = useRoute();
-const router = useRouter();
 const gtmStore = useGtmStore();
 
 // State
@@ -594,6 +624,7 @@ const error = ref(null);
 const copyInProgress = ref(false);
 const copyCompleted = ref(false);
 const copyResults = ref(null);
+const autoPublish = ref(true); // Par défaut, la publication automatique est activée
 
 // Source selection
 const source = ref({
@@ -693,7 +724,7 @@ function getAccountName(accountId) {
   return account ? account.name : 'Unknown Account';
 }
 
-function getContainerName(accountId, containerId) {
+function getContainerName(containerId) {
   // We might need to fetch containers for the target account if not already loaded
   if (gtmStore.containers.length === 0) return 'Loading...';
   
@@ -871,7 +902,8 @@ async function performCopy() {
       gtmStore.selectedSource,
       gtmStore.selectedTargets,
       activeElementTypes,
-      selectedElements.value // Pass the selected elements directly
+      selectedElements.value, // Pass the selected elements directly
+      autoPublish.value // Pass the auto-publish option
     );
     
     copyResults.value = response.data.result;

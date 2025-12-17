@@ -91,8 +91,8 @@ export default {
     },
     
     // Copy elements
-    copyElements(source, targets, elementTypes, selectedElements = null) {
-      return api.post('/api/gtm/copy', { source, targets, elementTypes, selectedElements });
+    copyElements(source, targets, elementTypes, selectedElements = null, autoPublish = true) {
+      return api.post('/api/gtm/copy', { source, targets, elementTypes, selectedElements, autoPublish });
     },
     
     // History

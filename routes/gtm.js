@@ -122,7 +122,7 @@ router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId
  */
 router.post('/copy', authenticate, async (req, res) => {
   try {
-    const { source, targets, elementTypes, selectedElements } = req.body;
+    const { source, targets, elementTypes, selectedElements, autoPublish = true } = req.body;
     
     // Validate required fields
     if (!source || !source.accountId || !source.containerId || !source.workspaceId) {
@@ -143,7 +143,8 @@ router.post('/copy', authenticate, async (req, res) => {
       source,
       targets,
       elementTypes,
-      selectedElements // Pass the selected element IDs
+      selectedElements, // Pass the selected element IDs
+      autoPublish // Pass the auto-publish option
     );
     
     res.status(200).json({ result });

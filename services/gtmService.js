@@ -992,12 +992,13 @@ const deleteWorkspace = async (googleUserId, accountId, containerId, workspaceId
 };
 
 /**
- * Copy selected elements from one workspace to another and publish
+ * Copy selected elements from one workspace to another and optionally publish
  * @param {string} googleUserId - Google user ID
  * @param {Object} source - Source container and workspace
  * @param {Array} targets - Target containers
  * @param {Array} elementTypes - Types of elements to copy (templates, tags, triggers, variables)
  * @param {Object} selectedElements - Object containing arrays of selected element IDs by type
+ * @param {boolean} autoPublish - Whether to automatically publish the workspace after copying
  * @returns {Object} - Copy results
  */
 const copyElements = async (
@@ -1005,7 +1006,8 @@ const copyElements = async (
   source, 
   targets, 
   elementTypes,
-  selectedElements = null
+  selectedElements = null,
+  autoPublish = true
 ) => {
   const results = [];
   let sourceElements = [];
@@ -1272,9 +1274,9 @@ const copyElements = async (
       // Determine if copying succeeded overall
       const copySucceeded = copiedElements.length > 0;
       
-      // Try to publish changes only if copying succeeded, but make it optional
+      // Try to publish changes only if copying succeeded and autoPublish is enabled
       let publishResult = null;
-      if (copySucceeded) {
+      if (copySucceeded && autoPublish) {
         try {
           console.log("Attempting to publish workspace changes...");
           console.log(`Publishing path: accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`);
@@ -1310,6 +1312,8 @@ const copyElements = async (
             error: errorMessage
           });
         }
+      } else if (copySucceeded && !autoPublish) {
+        console.log("Skipping publish step as autoPublish is disabled");
       } else {
         console.log("Skipping publish step as no elements were copied successfully");
       }
@@ -1318,7 +1322,8 @@ const copyElements = async (
       const operationStatus = copySucceeded ? (errors.length > 0 ? 'partial' : 'success') : 'failed';
       
       // Skip cleanup if publishing was successful - publishing a workspace automatically deletes it
-      if (!publishResult) {
+      // Also skip cleanup if autoPublish is disabled and elements were copied successfully
+      if (!publishResult && !(copySucceeded && !autoPublish)) {
         console.log("Publication didn't succeed. Checking if we need to clean up the temporary workspace...");
         
         try {
@@ -1348,8 +1353,10 @@ const copyElements = async (
             error: errorMessage
           });
         }
-      } else {
+      } else if (publishResult) {
         console.log("Publication was successful. Workspace was automatically deleted by GTM.");
+      } else if (copySucceeded && !autoPublish) {
+        console.log("Workspace preserved for manual review since autoPublish is disabled.");
       }
 
       // Save copy history to local storage
@@ -1372,6 +1379,7 @@ const copyElements = async (
         },
         workspace: tempWorkspace,
         published: publishResult !== null,
+        workspacePreserved: copySucceeded && !autoPublish,
         elements: {
           total: sourceElements.length,
           copied: copiedElements.length,
