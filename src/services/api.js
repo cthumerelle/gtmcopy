@@ -90,6 +90,11 @@ export default {
       return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/variables`);
     },
     
+    // Transformations
+    getTransformations(accountId, containerId, workspaceId) {
+      return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/transformations`);
+    },
+    
     // Copy elements
     copyElements(source, targets, elementTypes, selectedElements = null, autoPublish = true) {
       return api.post('/api/gtm/copy', { source, targets, elementTypes, selectedElements, autoPublish });

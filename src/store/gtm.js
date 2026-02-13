@@ -11,6 +11,7 @@ export const useGtmStore = defineStore('gtm', () => {
   const tags = ref([]);
   const triggers = ref([]);
   const variables = ref([]);
+  const transformations = ref([]);
   const copyHistory = ref([]);
   const copyDetails = ref(null);
   const loading = ref(false);
@@ -24,7 +25,7 @@ export const useGtmStore = defineStore('gtm', () => {
   });
   
   const selectedTargets = ref([]);
-  const selectedElementTypes = ref(['templates', 'tags', 'triggers', 'variables']);
+  const selectedElementTypes = ref(['templates', 'tags', 'triggers', 'variables', 'transformations']);
   
   // Copy operation state
   const copyStatus = ref({
@@ -200,6 +201,23 @@ export const useGtmStore = defineStore('gtm', () => {
     }
   }
   
+  async function fetchTransformations(accountId, containerId, workspaceId) {
+    if (!accountId || !containerId || !workspaceId) return;
+    
+    loading.value = true;
+    error.value = null;
+    
+    try {
+      const response = await api.gtm.getTransformations(accountId, containerId, workspaceId);
+      transformations.value = response.data.transformations || [];
+      loading.value = false;
+    } catch (err) {
+      console.error('Fetch transformations error:', err);
+      error.value = 'Failed to fetch GTM transformations';
+      loading.value = false;
+    }
+  }
+  
   async function fetchCopyHistory() {
     loading.value = true;
     error.value = null;
@@ -248,7 +266,8 @@ export const useGtmStore = defineStore('gtm', () => {
       fetchTemplates(accountId, containerId, workspaceId),
       fetchTags(accountId, containerId, workspaceId),
       fetchTriggers(accountId, containerId, workspaceId),
-      fetchVariables(accountId, containerId, workspaceId)
+      fetchVariables(accountId, containerId, workspaceId),
+      fetchTransformations(accountId, containerId, workspaceId)
     ]);
   }
   
@@ -357,6 +376,7 @@ export const useGtmStore = defineStore('gtm', () => {
     tags,
     triggers,
     variables,
+    transformations,
     copyHistory,
     copyDetails,
     loading,
@@ -381,6 +401,7 @@ export const useGtmStore = defineStore('gtm', () => {
     fetchTags,
     fetchTriggers,
     fetchVariables,
+    fetchTransformations,
     fetchCopyHistory,
     fetchCopyDetails,
     fetchSourceElements,

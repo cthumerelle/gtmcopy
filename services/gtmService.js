@@ -148,6 +148,25 @@ const buildTriggerMap = (sourceTriggers, destTriggers) => {
 };
 
 /**
+ * Build tag mapping from source tags to destination tags
+ * @param {Array} sourceTags - Source tags
+ * @param {Array} destTags - Destination tags  
+ * @returns {Object} - Map of tag name to destination tag ID
+ */
+const buildTagMap = (sourceTags, destTags) => {
+  const tagMap = {};
+  
+  sourceTags.forEach(sourceTag => {
+    const destTag = destTags.find(dest => dest.name === sourceTag.name);
+    if (destTag) {
+      tagMap[sourceTag.name] = destTag.tagId;
+    }
+  });
+  
+  return tagMap;
+};
+
+/**
  * Get trigger name from trigger ID using a trigger list
  * @param {string} triggerId - Trigger ID
  * @param {Array} triggerList - List of triggers with triggerId and name
@@ -432,6 +451,178 @@ const getVariables = async (googleUserId, accountId, containerId, workspaceId) =
     return response.data.variable || [];
   } catch (error) {
     console.error('Error fetching variables:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get all transformations in a workspace
+ * @param {string} googleUserId - Google user ID
+ * @param {string} accountId - GTM account ID
+ * @param {string} containerId - GTM container ID
+ * @param {string} workspaceId - GTM workspace ID
+ * @returns {Array} - List of transformations
+ */
+const getTransformations = async (googleUserId, accountId, containerId, workspaceId) => {
+  try {
+    const tagmanager = await getTagManagerClient(googleUserId);
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.transformations.list({
+        parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get transformations for container ${containerId}`
+    );
+    return response.data.transformation || [];
+  } catch (error) {
+    console.error('Error fetching transformations:', error);
+    throw error;
+  }
+};
+
+/**
+ * Map tag and template references in transformation parameters
+ * @param {Array} parameters - Transformation parameters
+ * @param {Object} tagMap - Map of tag names to destination tag IDs
+ * @param {Array} sourceTags - Source tags for name lookup
+ * @param {Object} templateMap - Map of template names to destination template IDs
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @param {string} containerId - Destination container ID
+ * @returns {Array} - Updated parameters with mapped references
+ */
+const mapTransformationTagReferences = (parameters, tagMap, sourceTags, templateMap = {}, sourceTemplates = [], containerId = null) => {
+  if (!parameters || !Array.isArray(parameters)) {
+    return parameters;
+  }
+
+  return parameters.map(param => {
+    const updatedParam = { ...param };
+    
+    // Map affectedTagTypes parameter (contains CVT references)
+    if (param.key === 'affectedTagTypes' && param.list && param.list.length > 0) {
+      updatedParam.list = param.list.map(listItem => {
+        if (listItem.type === 'map' && listItem.map) {
+          const updatedMap = listItem.map.map(mapItem => {
+            // Map CVT template references in tagType
+            if (mapItem.key === 'tagType' && mapItem.value && isCustomTemplateType(mapItem.value)) {
+              try {
+                const mappedType = mapTemplateType(mapItem.value, templateMap, sourceTemplates, containerId);
+                console.log(`Mapped transformation tagType from ${mapItem.value} to ${mappedType}`);
+                return {
+                  ...mapItem,
+                  value: mappedType
+                };
+              } catch (error) {
+                console.error(`Error mapping transformation tagType ${mapItem.value}:`, error);
+                return mapItem;
+              }
+            }
+            return mapItem;
+          });
+          
+          return {
+            ...listItem,
+            map: updatedMap
+          };
+        }
+        return listItem;
+      });
+    }
+    
+    // Map affectedTags parameter (might contain tag references)
+    if (param.key === 'affectedTags' && param.list && param.list.length > 0) {
+      updatedParam.list = param.list.map(listItem => {
+        if (listItem.type === 'tag_reference' && listItem.value) {
+          // For tag_reference, the value is the tag name, no mapping needed
+          // Names should be the same between source and destination
+          console.log(`Preserving tag reference: ${listItem.value}`);
+          return listItem;
+        }
+        return listItem;
+      });
+    }
+    
+    return updatedParam;
+  });
+};
+
+/**
+ * Copy a transformation to a target workspace
+ * @param {string} googleUserId - Google user ID
+ * @param {Object} transformation - Transformation to copy
+ * @param {string} targetPath - Target workspace path
+ * @param {Object} tagMap - Map of tag names to destination tag IDs
+ * @param {Array} sourceTags - Source tags for name lookup
+ * @param {Object} templateMap - Map of template names to destination template IDs
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @param {string} containerId - Destination container ID
+ * @returns {Object} - Created or updated transformation
+ */
+const copyTransformation = async (googleUserId, transformation, targetPath, tagMap = {}, sourceTags = [], templateMap = {}, sourceTemplates = [], containerId = null) => {
+  try {
+    const tagmanager = await getTagManagerClient(googleUserId);
+    
+    // First, get all transformations in the target workspace to check for duplicates
+    const existingTransformationsResponse = await tagmanager.accounts.containers.workspaces.transformations.list({
+      parent: targetPath
+    });
+    
+    const existingTransformations = existingTransformationsResponse.data.transformation || [];
+    const existingTransformation = existingTransformations.find(t => t.name === transformation.name);
+    
+    // Create a clean copy with only the essential fields to avoid ID conflicts
+    const transformationCopy = {
+      name: transformation.name,
+      type: transformation.type
+    };
+    
+    // Include other important fields that don't have ID conflicts
+    if (transformation.parameter) {
+      // Map tag and template references in parameters before copying
+      transformationCopy.parameter = mapTransformationTagReferences(
+        transformation.parameter, 
+        tagMap, 
+        sourceTags,
+        templateMap,
+        sourceTemplates,
+        containerId
+      );
+    }
+    if (transformation.notes) transformationCopy.notes = transformation.notes;
+    if (transformation.parentFolderId) transformationCopy.parentFolderId = transformation.parentFolderId;
+    
+    let response;
+    
+    if (existingTransformation) {
+      // Transformation with this name already exists, update it instead
+      console.log(`Transformation with name "${transformation.name}" already exists. Updating.`);
+      
+      // Keep the existing transformation's ID and fingerprint
+      const transformationPath = `${targetPath}/transformations/${existingTransformation.transformationId}`;
+      transformationCopy.fingerprint = existingTransformation.fingerprint;
+      
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.transformations.update({
+          path: transformationPath,
+          requestBody: transformationCopy
+        }),
+        `Update transformation "${transformation.name}"`
+      );
+      console.log(`Updated transformation "${transformation.name}"`);
+    } else {
+      // Create a new transformation
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.transformations.create({
+          parent: targetPath,
+          requestBody: transformationCopy
+        }),
+        `Create transformation "${transformation.name}"`
+      );
+      console.log(`Created new transformation "${transformation.name}"`);
+    }
+    
+    return response.data;
+  } catch (error) {
+    console.error('Error copying transformation:', error);
     throw error;
   }
 };
@@ -1091,6 +1282,24 @@ const copyElements = async (
     
     sourceElements = [...sourceElements, ...selectedVariables.map(el => ({ ...el, elementType: 'variable' }))];
   }
+  
+  if (elementTypes.includes('transformations')) {
+    const transformations = await getTransformations(
+      googleUserId, 
+      source.accountId, 
+      source.containerId, 
+      source.workspaceId
+    );
+    
+    // Filter transformations if specific selections were provided
+    let selectedTransformations = transformations;
+    if (selectedElements && selectedElements.transformations && selectedElements.transformations.length > 0) {
+      selectedTransformations = transformations.filter(transformation => 
+        selectedElements.transformations.includes(transformation.transformationId));
+    }
+    
+    sourceElements = [...sourceElements, ...selectedTransformations.map(el => ({ ...el, elementType: 'transformation' }))];
+  }
 
   console.log(`Total elements to copy: ${sourceElements.length}`);
   
@@ -1198,16 +1407,22 @@ const copyElements = async (
       let triggerMap = buildTriggerMap(allSourceTriggers, destTriggers);
       console.log(`Trigger mapping for container ${target.containerId}:`, triggerMap);
 
+      // Pre-build tag mapping for transformations (will be updated as tags are copied)
+      const allSourceTags = sourceElements.filter(el => el.elementType === 'tag');
+      let tagMap = {};
+
       // Sort elements to copy in the right dependency order:
       // 1. templates (needed by tags, triggers, and variables)
       // 2. variables (may be needed by triggers and tags)
       // 3. triggers (needed by tags)
       // 4. tags (dependent on the above)
+      // 5. transformations (can reference tags, so must be copied after tags)
       const orderedElements = [
         ...sourceElements.filter(el => el.elementType === 'template'),
         ...sourceElements.filter(el => el.elementType === 'variable'),
         ...sourceElements.filter(el => el.elementType === 'trigger'),
-        ...sourceElements.filter(el => el.elementType === 'tag')
+        ...sourceElements.filter(el => el.elementType === 'tag'),
+        ...sourceElements.filter(el => el.elementType === 'transformation')
       ];
 
       console.log(`Copying elements in dependency order. Total elements: ${orderedElements.length}`);
@@ -1229,8 +1444,8 @@ const copyElements = async (
           // Update or create elements based on their type
           if (element.elementType === 'template') {
             result = await copyTemplate(googleUserId, element, targetPath);
-          } else if (element.elementType === 'tag') {
-            result = await copyTag(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId, triggerMap, allSourceTriggers);
+          } else if (element.elementType === 'variable') {
+            result = await copyVariable(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
           } else if (element.elementType === 'trigger') {
             result = await copyTrigger(googleUserId, element, targetPath);
             
@@ -1239,8 +1454,16 @@ const copyElements = async (
               triggerMap[result.name] = result.triggerId;
               console.log(`Updated trigger map: "${result.name}" -> ${result.triggerId}`);
             }
-          } else if (element.elementType === 'variable') {
-            result = await copyVariable(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
+          } else if (element.elementType === 'tag') {
+            result = await copyTag(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId, triggerMap, allSourceTriggers);
+            
+            // Update tag map with newly created/updated tag
+            if (result && result.tagId && result.name) {
+              tagMap[result.name] = result.tagId;
+              console.log(`Updated tag map: "${result.name}" -> ${result.tagId}`);
+            }
+          } else if (element.elementType === 'transformation') {
+            result = await copyTransformation(googleUserId, element, targetPath, tagMap, allSourceTags, templateMap, sourceTemplates, target.containerId);
           }
           
           if (result) {
@@ -1458,6 +1681,7 @@ export {
   getTags,
   getTriggers,
   getVariables,
+  getTransformations,
   copyElements,
   getHistory as getCopyHistory,
   getDetails as getCopyDetails,

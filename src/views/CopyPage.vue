@@ -308,6 +308,48 @@
             </div>
           </div>
           
+          <!-- Transformations section -->
+          <div v-if="gtmStore.transformations.length > 0" class="mb-8">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="font-medium text-gray-700">
+                Transformations 
+                <span class="text-sm text-gray-500">({{ selectedElements.transformations.length }} / {{ gtmStore.transformations.length }} selected)</span>
+              </h3>
+              <div class="flex items-center space-x-2">
+                <button
+                  @click="selectAllOfType('transformations')"
+                  class="text-xs text-primary-600 hover:text-primary-800"
+                >
+                  Select All
+                </button>
+                <button
+                  @click="deselectAllOfType('transformations')"
+                  class="text-xs text-primary-600 hover:text-primary-800"
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+            
+            <div class="bg-gray-50 p-4 rounded-md mb-4 max-h-60 overflow-y-auto">
+              <div v-for="transformation in gtmStore.transformations" :key="transformation.transformationId" class="flex items-center mb-2 last:mb-0">
+                <input 
+                  :id="`transformation-${transformation.transformationId}`" 
+                  type="checkbox"
+                  v-model="selectedElements.transformations"
+                  :value="transformation.transformationId"
+                  class="checkbox"
+                />
+                <label :for="`transformation-${transformation.transformationId}`" class="ml-2 text-sm text-gray-700">
+                  {{ transformation.name }}
+                </label>
+              </div>
+              <div v-if="gtmStore.transformations.length === 0" class="text-sm text-gray-500 text-center py-2">
+                No transformations available
+              </div>
+            </div>
+          </div>
+          
           <div class="flex justify-between mt-8">
             <button @click="prevStep" class="btn-secondary">Back: Source Selection</button>
             <button 
@@ -548,6 +590,9 @@
                   <li v-if="selectedElements.variables.length > 0" class="text-sm">
                     <span class="font-medium">Variables:</span> {{ selectedElements.variables.length }}
                   </li>
+                  <li v-if="selectedElements.transformations.length > 0" class="text-sm">
+                    <span class="font-medium">Transformations:</span> {{ selectedElements.transformations.length }}
+                  </li>
                 </ul>
               </div>
               
@@ -638,7 +683,8 @@ const selectedElements = ref({
   templates: [],
   tags: [],
   triggers: [],
-  variables: []
+  variables: [],
+  transformations: []
 });
 
 // Total selected elements across all types
@@ -646,7 +692,8 @@ const totalSelectedElements = computed(() => {
   return selectedElements.value.templates.length +
          selectedElements.value.tags.length +
          selectedElements.value.triggers.length +
-         selectedElements.value.variables.length;
+         selectedElements.value.variables.length +
+         selectedElements.value.transformations.length;
 });
 
 // Target selection
@@ -675,6 +722,7 @@ function selectAllElements() {
   selectAllOfType('tags');
   selectAllOfType('triggers');
   selectAllOfType('variables');
+  selectAllOfType('transformations');
 }
 
 function deselectAllElements() {
@@ -682,6 +730,7 @@ function deselectAllElements() {
   deselectAllOfType('tags');
   deselectAllOfType('triggers');
   deselectAllOfType('variables');
+  deselectAllOfType('transformations');
 }
 
 function selectAllOfType(type) {
@@ -697,6 +746,9 @@ function selectAllOfType(type) {
       break;
     case 'variables':
       selectedElements.value.variables = gtmStore.variables.map(v => v.variableId);
+      break;
+    case 'transformations':
+      selectedElements.value.transformations = gtmStore.transformations.map(t => t.transformationId);
       break;
   }
 }
@@ -714,6 +766,9 @@ function deselectAllOfType(type) {
       break;
     case 'variables':
       selectedElements.value.variables = [];
+      break;
+    case 'transformations':
+      selectedElements.value.transformations = [];
       break;
   }
 }
@@ -844,6 +899,7 @@ function nextStep() {
     if (selectedElements.value.tags.length > 0) activeElementTypes.push('tags');
     if (selectedElements.value.triggers.length > 0) activeElementTypes.push('triggers');
     if (selectedElements.value.variables.length > 0) activeElementTypes.push('variables');
+    if (selectedElements.value.transformations.length > 0) activeElementTypes.push('transformations');
     
     // Save the selected element types
     gtmStore.setSelectedElementTypes(activeElementTypes);
@@ -890,6 +946,7 @@ async function performCopy() {
     if (selectedElements.value.tags.length > 0) activeElementTypes.push('tags');
     if (selectedElements.value.triggers.length > 0) activeElementTypes.push('triggers');
     if (selectedElements.value.variables.length > 0) activeElementTypes.push('variables');
+    if (selectedElements.value.transformations.length > 0) activeElementTypes.push('transformations');
     
     // Save the active element types to the store
     gtmStore.setSelectedElementTypes(activeElementTypes);

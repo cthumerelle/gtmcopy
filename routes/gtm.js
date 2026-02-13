@@ -116,6 +116,22 @@ router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId
 });
 
 /**
+ * @route   GET /api/gtm/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/transformations
+ * @desc    Get all transformations in a workspace
+ * @access  Private
+ */
+router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/transformations', authenticate, async (req, res) => {
+  try {
+    const { accountId, containerId, workspaceId } = req.params;
+    const transformations = await gtmService.getTransformations(req.user.googleUserId, accountId, containerId, workspaceId);
+    res.status(200).json({ transformations });
+  } catch (error) {
+    console.error('Error fetching transformations:', error);
+    res.status(500).json({ message: 'Failed to fetch transformations', error: error.message });
+  }
+});
+
+/**
  * @route   POST /api/gtm/copy
  * @desc    Copy selected elements from one workspace to multiple targets
  * @access  Private
