@@ -90,6 +90,11 @@ export default {
       return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/variables`);
     },
     
+    // Clients
+    getClients(accountId, containerId, workspaceId) {
+      return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/clients`);
+    },
+
     // Transformations
     getTransformations(accountId, containerId, workspaceId) {
       return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/transformations`);

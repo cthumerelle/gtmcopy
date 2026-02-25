@@ -116,6 +116,22 @@ router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId
 });
 
 /**
+ * @route   GET /api/gtm/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/clients
+ * @desc    Get all clients in a workspace (server-side containers only)
+ * @access  Private
+ */
+router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/clients', authenticate, async (req, res) => {
+  try {
+    const { accountId, containerId, workspaceId } = req.params;
+    const clients = await gtmService.getClients(req.user.googleUserId, accountId, containerId, workspaceId);
+    res.status(200).json({ clients });
+  } catch (error) {
+    console.error('Error fetching clients:', error);
+    res.status(500).json({ message: 'Failed to fetch clients', error: error.message });
+  }
+});
+
+/**
  * @route   GET /api/gtm/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/transformations
  * @desc    Get all transformations in a workspace
  * @access  Private

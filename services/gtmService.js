@@ -456,6 +456,35 @@ const getVariables = async (googleUserId, accountId, containerId, workspaceId) =
 };
 
 /**
+ * Get all clients in a workspace (server-side containers only)
+ * @param {string} googleUserId - Google user ID
+ * @param {string} accountId - GTM account ID
+ * @param {string} containerId - GTM container ID
+ * @param {string} workspaceId - GTM workspace ID
+ * @returns {Array} - List of clients
+ */
+const getClients = async (googleUserId, accountId, containerId, workspaceId) => {
+  try {
+    const tagmanager = await getTagManagerClient(googleUserId);
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.clients.list({
+        parent: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get clients for container ${containerId}`
+    );
+    return response.data.client || [];
+  } catch (error) {
+    // Clients are only available in server-side containers; silently return empty for web containers
+    if (error.code === 400 || (error.response && error.response.status === 400)) {
+      console.log(`Clients not available for container ${containerId} (likely a web container)`);
+      return [];
+    }
+    console.error('Error fetching clients:', error);
+    throw error;
+  }
+};
+
+/**
  * Get all transformations in a workspace
  * @param {string} googleUserId - Google user ID
  * @param {string} accountId - GTM account ID
@@ -623,6 +652,87 @@ const copyTransformation = async (googleUserId, transformation, targetPath, tagM
     return response.data;
   } catch (error) {
     console.error('Error copying transformation:', error);
+    throw error;
+  }
+};
+
+/**
+ * Copy a client to a target workspace (server-side containers only)
+ * @param {string} googleUserId - Google user ID
+ * @param {Object} client - Client to copy
+ * @param {string} targetPath - Target workspace path
+ * @param {Object} templateMap - Map of template names to destination template IDs
+ * @param {Array} sourceTemplates - Source templates for name lookup
+ * @param {string} containerId - Destination container ID
+ * @returns {Object} - Created or updated client
+ */
+const copyClient = async (googleUserId, client, targetPath, templateMap = {}, sourceTemplates = [], containerId = null) => {
+  try {
+    const tagmanager = await getTagManagerClient(googleUserId);
+
+    // Get existing clients in the target workspace to check for duplicates
+    const existingClientsResponse = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.clients.list({
+        parent: targetPath
+      }),
+      `List clients in ${targetPath}`
+    );
+
+    const existingClients = existingClientsResponse.data.client || [];
+    const existingClient = existingClients.find(c => c.name === client.name);
+
+    // Map template type if the client uses a custom template type
+    let mappedType = client.type;
+    if (isCustomTemplateType(client.type) && templateMap && sourceTemplates && containerId) {
+      try {
+        mappedType = mapTemplateType(client.type, templateMap, sourceTemplates, containerId);
+        console.log(`Mapped client type from ${client.type} to ${mappedType}`);
+      } catch (error) {
+        console.error(`Error mapping template type for client ${client.name}:`, error);
+        throw error;
+      }
+    }
+
+    // Create a clean copy with only the essential fields to avoid ID conflicts
+    const clientCopy = {
+      name: client.name,
+      type: mappedType
+    };
+
+    if (client.parameter) clientCopy.parameter = client.parameter;
+    if (client.priority) clientCopy.priority = client.priority;
+    if (client.notes) clientCopy.notes = client.notes;
+    if (client.parentFolderId) clientCopy.parentFolderId = client.parentFolderId;
+
+    let response;
+
+    if (existingClient) {
+      console.log(`Client with name "${client.name}" already exists. Updating.`);
+      const clientPath = `${targetPath}/clients/${existingClient.clientId}`;
+      clientCopy.fingerprint = existingClient.fingerprint;
+
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.clients.update({
+          path: clientPath,
+          requestBody: clientCopy
+        }),
+        `Update client "${client.name}"`
+      );
+      console.log(`Updated client "${client.name}"`);
+    } else {
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.clients.create({
+          parent: targetPath,
+          requestBody: clientCopy
+        }),
+        `Create client "${client.name}"`
+      );
+      console.log(`Created new client "${client.name}"`);
+    }
+
+    return response.data;
+  } catch (error) {
+    console.error('Error copying client:', error);
     throw error;
   }
 };
@@ -1283,21 +1393,39 @@ const copyElements = async (
     sourceElements = [...sourceElements, ...selectedVariables.map(el => ({ ...el, elementType: 'variable' }))];
   }
   
-  if (elementTypes.includes('transformations')) {
-    const transformations = await getTransformations(
-      googleUserId, 
-      source.accountId, 
-      source.containerId, 
+  if (elementTypes.includes('clients')) {
+    const clients = await getClients(
+      googleUserId,
+      source.accountId,
+      source.containerId,
       source.workspaceId
     );
-    
+
+    // Filter clients if specific selections were provided
+    let selectedClients = clients;
+    if (selectedElements && selectedElements.clients && selectedElements.clients.length > 0) {
+      selectedClients = clients.filter(client =>
+        selectedElements.clients.includes(client.clientId));
+    }
+
+    sourceElements = [...sourceElements, ...selectedClients.map(el => ({ ...el, elementType: 'client' }))];
+  }
+
+  if (elementTypes.includes('transformations')) {
+    const transformations = await getTransformations(
+      googleUserId,
+      source.accountId,
+      source.containerId,
+      source.workspaceId
+    );
+
     // Filter transformations if specific selections were provided
     let selectedTransformations = transformations;
     if (selectedElements && selectedElements.transformations && selectedElements.transformations.length > 0) {
-      selectedTransformations = transformations.filter(transformation => 
+      selectedTransformations = transformations.filter(transformation =>
         selectedElements.transformations.includes(transformation.transformationId));
     }
-    
+
     sourceElements = [...sourceElements, ...selectedTransformations.map(el => ({ ...el, elementType: 'transformation' }))];
   }
 
@@ -1412,13 +1540,15 @@ const copyElements = async (
       let tagMap = {};
 
       // Sort elements to copy in the right dependency order:
-      // 1. templates (needed by tags, triggers, and variables)
-      // 2. variables (may be needed by triggers and tags)
-      // 3. triggers (needed by tags)
-      // 4. tags (dependent on the above)
-      // 5. transformations (can reference tags, so must be copied after tags)
+      // 1. templates (needed by clients, variables, tags, triggers)
+      // 2. clients (server-side request processors, use templates, independent of other types)
+      // 3. variables (may be needed by triggers and tags)
+      // 4. triggers (needed by tags)
+      // 5. tags (dependent on the above)
+      // 6. transformations (can reference tags, so must be copied after tags)
       const orderedElements = [
         ...sourceElements.filter(el => el.elementType === 'template'),
+        ...sourceElements.filter(el => el.elementType === 'client'),
         ...sourceElements.filter(el => el.elementType === 'variable'),
         ...sourceElements.filter(el => el.elementType === 'trigger'),
         ...sourceElements.filter(el => el.elementType === 'tag'),
@@ -1462,6 +1592,8 @@ const copyElements = async (
               tagMap[result.name] = result.tagId;
               console.log(`Updated tag map: "${result.name}" -> ${result.tagId}`);
             }
+          } else if (element.elementType === 'client') {
+            result = await copyClient(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
           } else if (element.elementType === 'transformation') {
             result = await copyTransformation(googleUserId, element, targetPath, tagMap, allSourceTags, templateMap, sourceTemplates, target.containerId);
           }
@@ -1681,6 +1813,7 @@ export {
   getTags,
   getTriggers,
   getVariables,
+  getClients,
   getTransformations,
   copyElements,
   getHistory as getCopyHistory,

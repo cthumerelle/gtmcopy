@@ -11,6 +11,7 @@ export const useGtmStore = defineStore('gtm', () => {
   const tags = ref([]);
   const triggers = ref([]);
   const variables = ref([]);
+  const clients = ref([]);
   const transformations = ref([]);
   const copyHistory = ref([]);
   const copyDetails = ref(null);
@@ -25,7 +26,7 @@ export const useGtmStore = defineStore('gtm', () => {
   });
   
   const selectedTargets = ref([]);
-  const selectedElementTypes = ref(['templates', 'tags', 'triggers', 'variables', 'transformations']);
+  const selectedElementTypes = ref(['templates', 'tags', 'triggers', 'variables', 'clients', 'transformations']);
   
   // Copy operation state
   const copyStatus = ref({
@@ -203,10 +204,10 @@ export const useGtmStore = defineStore('gtm', () => {
   
   async function fetchTransformations(accountId, containerId, workspaceId) {
     if (!accountId || !containerId || !workspaceId) return;
-    
+
     loading.value = true;
     error.value = null;
-    
+
     try {
       const response = await api.gtm.getTransformations(accountId, containerId, workspaceId);
       transformations.value = response.data.transformations || [];
@@ -214,6 +215,24 @@ export const useGtmStore = defineStore('gtm', () => {
     } catch (err) {
       console.error('Fetch transformations error:', err);
       error.value = 'Failed to fetch GTM transformations';
+      loading.value = false;
+    }
+  }
+
+  async function fetchClients(accountId, containerId, workspaceId) {
+    if (!accountId || !containerId || !workspaceId) return;
+
+    loading.value = true;
+    error.value = null;
+
+    try {
+      const response = await api.gtm.getClients(accountId, containerId, workspaceId);
+      clients.value = response.data.clients || [];
+      loading.value = false;
+    } catch (err) {
+      console.error('Fetch clients error:', err);
+      // Clients are only available in server-side containers; don't block on error
+      clients.value = [];
       loading.value = false;
     }
   }
@@ -267,6 +286,7 @@ export const useGtmStore = defineStore('gtm', () => {
       fetchTags(accountId, containerId, workspaceId),
       fetchTriggers(accountId, containerId, workspaceId),
       fetchVariables(accountId, containerId, workspaceId),
+      fetchClients(accountId, containerId, workspaceId),
       fetchTransformations(accountId, containerId, workspaceId)
     ]);
   }
@@ -376,6 +396,7 @@ export const useGtmStore = defineStore('gtm', () => {
     tags,
     triggers,
     variables,
+    clients,
     transformations,
     copyHistory,
     copyDetails,
@@ -401,6 +422,7 @@ export const useGtmStore = defineStore('gtm', () => {
     fetchTags,
     fetchTriggers,
     fetchVariables,
+    fetchClients,
     fetchTransformations,
     fetchCopyHistory,
     fetchCopyDetails,

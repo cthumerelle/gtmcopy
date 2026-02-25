@@ -308,6 +308,45 @@
             </div>
           </div>
           
+          <!-- Clients section (server-side containers only) -->
+          <div v-if="gtmStore.clients.length > 0" class="mb-8">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="font-medium text-gray-700">
+                Clients
+                <span class="text-sm text-gray-500">({{ selectedElements.clients.length }} / {{ gtmStore.clients.length }} selected)</span>
+              </h3>
+              <div class="flex items-center space-x-2">
+                <button
+                  @click="selectAllOfType('clients')"
+                  class="text-xs text-primary-600 hover:text-primary-800"
+                >
+                  Select All
+                </button>
+                <button
+                  @click="deselectAllOfType('clients')"
+                  class="text-xs text-primary-600 hover:text-primary-800"
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+
+            <div class="bg-gray-50 p-4 rounded-md mb-4 max-h-60 overflow-y-auto">
+              <div v-for="client in gtmStore.clients" :key="client.clientId" class="flex items-center mb-2 last:mb-0">
+                <input
+                  :id="`client-${client.clientId}`"
+                  type="checkbox"
+                  v-model="selectedElements.clients"
+                  :value="client.clientId"
+                  class="checkbox"
+                />
+                <label :for="`client-${client.clientId}`" class="ml-2 text-sm text-gray-700">
+                  {{ client.name }}
+                </label>
+              </div>
+            </div>
+          </div>
+
           <!-- Transformations section -->
           <div v-if="gtmStore.transformations.length > 0" class="mb-8">
             <div class="flex items-center justify-between mb-2">
@@ -590,6 +629,9 @@
                   <li v-if="selectedElements.variables.length > 0" class="text-sm">
                     <span class="font-medium">Variables:</span> {{ selectedElements.variables.length }}
                   </li>
+                  <li v-if="selectedElements.clients.length > 0" class="text-sm">
+                    <span class="font-medium">Clients:</span> {{ selectedElements.clients.length }}
+                  </li>
                   <li v-if="selectedElements.transformations.length > 0" class="text-sm">
                     <span class="font-medium">Transformations:</span> {{ selectedElements.transformations.length }}
                   </li>
@@ -684,6 +726,7 @@ const selectedElements = ref({
   tags: [],
   triggers: [],
   variables: [],
+  clients: [],
   transformations: []
 });
 
@@ -693,6 +736,7 @@ const totalSelectedElements = computed(() => {
          selectedElements.value.tags.length +
          selectedElements.value.triggers.length +
          selectedElements.value.variables.length +
+         selectedElements.value.clients.length +
          selectedElements.value.transformations.length;
 });
 
@@ -722,6 +766,7 @@ function selectAllElements() {
   selectAllOfType('tags');
   selectAllOfType('triggers');
   selectAllOfType('variables');
+  selectAllOfType('clients');
   selectAllOfType('transformations');
 }
 
@@ -730,6 +775,7 @@ function deselectAllElements() {
   deselectAllOfType('tags');
   deselectAllOfType('triggers');
   deselectAllOfType('variables');
+  deselectAllOfType('clients');
   deselectAllOfType('transformations');
 }
 
@@ -746,6 +792,9 @@ function selectAllOfType(type) {
       break;
     case 'variables':
       selectedElements.value.variables = gtmStore.variables.map(v => v.variableId);
+      break;
+    case 'clients':
+      selectedElements.value.clients = gtmStore.clients.map(c => c.clientId);
       break;
     case 'transformations':
       selectedElements.value.transformations = gtmStore.transformations.map(t => t.transformationId);
@@ -766,6 +815,9 @@ function deselectAllOfType(type) {
       break;
     case 'variables':
       selectedElements.value.variables = [];
+      break;
+    case 'clients':
+      selectedElements.value.clients = [];
       break;
     case 'transformations':
       selectedElements.value.transformations = [];
@@ -899,11 +951,12 @@ function nextStep() {
     if (selectedElements.value.tags.length > 0) activeElementTypes.push('tags');
     if (selectedElements.value.triggers.length > 0) activeElementTypes.push('triggers');
     if (selectedElements.value.variables.length > 0) activeElementTypes.push('variables');
+    if (selectedElements.value.clients.length > 0) activeElementTypes.push('clients');
     if (selectedElements.value.transformations.length > 0) activeElementTypes.push('transformations');
-    
+
     // Save the selected element types
     gtmStore.setSelectedElementTypes(activeElementTypes);
-    
+
     // Save the individual element selections for filtering on the backend
     // Use direct assignment as a workaround since the setter function might not be exposed properly
     gtmStore.selectedElements = selectedElements.value;
@@ -946,8 +999,9 @@ async function performCopy() {
     if (selectedElements.value.tags.length > 0) activeElementTypes.push('tags');
     if (selectedElements.value.triggers.length > 0) activeElementTypes.push('triggers');
     if (selectedElements.value.variables.length > 0) activeElementTypes.push('variables');
+    if (selectedElements.value.clients.length > 0) activeElementTypes.push('clients');
     if (selectedElements.value.transformations.length > 0) activeElementTypes.push('transformations');
-    
+
     // Save the active element types to the store
     gtmStore.setSelectedElementTypes(activeElementTypes);
     
@@ -1017,7 +1071,15 @@ onMounted(async () => {
     
     // Load previously selected elements
     if (gtmStore.selectedElements) {
-      selectedElements.value = { ...gtmStore.selectedElements };
+      selectedElements.value = {
+        templates: [],
+        tags: [],
+        triggers: [],
+        variables: [],
+        clients: [],
+        transformations: [],
+        ...gtmStore.selectedElements
+      };
     }
     
   } catch (err) {
