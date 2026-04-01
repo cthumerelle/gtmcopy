@@ -1401,7 +1401,7 @@ const copyElements = async (
   targets,
   elementTypes,
   selectedElements = null,
-  deletedElementNames = null,   // ← add this parameter
+  deletedElementNames = null,
   autoPublish = true
 ) => {
   const results = [];
