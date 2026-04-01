@@ -34,7 +34,16 @@ export const useGtmStore = defineStore('gtm', () => {
     completed: false,
     results: null
   });
-  
+
+  const workspaceChanges = ref({
+    tags: {},
+    triggers: {},
+    variables: {},
+    templates: {},
+    clients: {},
+    transformations: {}
+  });
+
   // Load previously selected sources and targets from local storage
   const initializeFromLocalStorage = () => {
     try {
@@ -277,20 +286,31 @@ export const useGtmStore = defineStore('gtm', () => {
         !selectedSource.value.workspaceId) {
       return;
     }
-    
+
     const { accountId, containerId, workspaceId } = selectedSource.value;
-    
-    // Fetch all element types in parallel
+
+    // fetchWorkspaceStatus catches its own errors and never rejects — safe to include in Promise.all
     await Promise.all([
       fetchTemplates(accountId, containerId, workspaceId),
       fetchTags(accountId, containerId, workspaceId),
       fetchTriggers(accountId, containerId, workspaceId),
       fetchVariables(accountId, containerId, workspaceId),
       fetchClients(accountId, containerId, workspaceId),
-      fetchTransformations(accountId, containerId, workspaceId)
+      fetchTransformations(accountId, containerId, workspaceId),
+      fetchWorkspaceStatus(accountId, containerId, workspaceId)
     ]);
   }
-  
+
+  async function fetchWorkspaceStatus(accountId, containerId, workspaceId) {
+    try {
+      const response = await api.gtm.getWorkspaceStatus(accountId, containerId, workspaceId);
+      workspaceChanges.value = response.data.status;
+    } catch (err) {
+      console.warn('Could not fetch workspace status, suggestions disabled:', err);
+      workspaceChanges.value = { tags: {}, triggers: {}, variables: {}, templates: {}, clients: {}, transformations: {} };
+    }
+  }
+
   function setSelectedSource(source) {
     selectedSource.value = source;
     localStorage.setItem('gtmcopy_source', JSON.stringify(source));
@@ -407,13 +427,14 @@ export const useGtmStore = defineStore('gtm', () => {
     selectedElementTypes,
     selectedElements,
     copyStatus,
-    
+    workspaceChanges,
+
     // Computed
     hasSourceSelected,
     hasTargetsSelected,
     hasElementTypesSelected,
     canPerformCopy,
-    
+
     // Actions
     fetchAccounts,
     fetchContainers,
@@ -427,6 +448,7 @@ export const useGtmStore = defineStore('gtm', () => {
     fetchCopyHistory,
     fetchCopyDetails,
     fetchSourceElements,
+    fetchWorkspaceStatus,
     setSelectedSource,
     addTarget,
     removeTarget,
