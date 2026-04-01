@@ -1133,7 +1133,7 @@ const resolveDestinationWorkspace = async (googleUserId, accountId, containerId,
 
     // Look for an existing workspace with the same name in the destination container
     const existingWorkspaces = await getWorkspaces(googleUserId, accountId, containerId);
-    const existing = existingWorkspaces.find(w => w.name === sourceWorkspaceName);
+    const existing = (existingWorkspaces || []).find(w => w.name === sourceWorkspaceName);
     if (existing) {
       console.log(`Reusing existing workspace "${sourceWorkspaceName}" (${existing.workspaceId}) in container ${containerId}`);
       return existing;
@@ -1151,7 +1151,7 @@ const resolveDestinationWorkspace = async (googleUserId, accountId, containerId,
       }),
       `Create workspace "${sourceWorkspaceName}" in container ${containerId}`
     );
-    console.log(`Created new workspace "${sourceWorkspaceName}" in container ${containerId}`);
+    console.log(`Created new workspace "${sourceWorkspaceName}" (${response.data.workspaceId}) in container ${containerId}`);
     return response.data;
   } catch (error) {
     console.error('Error resolving destination workspace:', error);
