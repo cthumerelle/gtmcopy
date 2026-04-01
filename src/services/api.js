@@ -99,10 +99,15 @@ export default {
     getTransformations(accountId, containerId, workspaceId) {
       return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/transformations`);
     },
-    
+
+    // Workspace status (changes vs published version)
+    getWorkspaceStatus(accountId, containerId, workspaceId) {
+      return api.get(`/api/gtm/accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}/status`);
+    },
+
     // Copy elements
-    copyElements(source, targets, elementTypes, selectedElements = null, autoPublish = true) {
-      return api.post('/api/gtm/copy', { source, targets, elementTypes, selectedElements, autoPublish });
+    copyElements(source, targets, elementTypes, selectedElements = null, deletedElementNames = null, autoPublish = true) {
+      return api.post('/api/gtm/copy', { source, targets, elementTypes, selectedElements, deletedElementNames, autoPublish });
     },
     
     // History
