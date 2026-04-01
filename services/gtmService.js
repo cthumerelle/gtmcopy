@@ -381,7 +381,7 @@ const getWorkspaceStatus = async (googleUserId, accountId, containerId, workspac
       for (const [apiKey, { key, idField }] of Object.entries(typeMap)) {
         if (change[apiKey]) {
           const id = change[apiKey][idField];
-          if (id) result[key][id] = change.changeType;
+          if (id) result[key][id] = change.changeStatus;
           break;
         }
       }
@@ -1116,6 +1116,50 @@ const createTempWorkspace = async (googleUserId, accountId, containerId) => {
 };
 
 /**
+ * Resolve the destination workspace: reuse an existing one by name or create a new one.
+ * Falls back to temp-copy-{timestamp} when sourceWorkspaceName is empty or "Default Workspace".
+ * @param {string} googleUserId - Google user ID
+ * @param {string} accountId - GTM account ID
+ * @param {string} containerId - GTM container ID
+ * @param {string} sourceWorkspaceName - Name of the source workspace
+ * @returns {Object} - Workspace object (existing or newly created)
+ */
+const resolveDestinationWorkspace = async (googleUserId, accountId, containerId, sourceWorkspaceName) => {
+  try {
+    // Default Workspace or missing name → keep existing temp-copy-{timestamp} behavior
+    if (!sourceWorkspaceName || sourceWorkspaceName === 'Default Workspace') {
+      return await createTempWorkspace(googleUserId, accountId, containerId);
+    }
+
+    // Look for an existing workspace with the same name in the destination container
+    const existingWorkspaces = await getWorkspaces(googleUserId, accountId, containerId);
+    const existing = existingWorkspaces.find(w => w.name === sourceWorkspaceName);
+    if (existing) {
+      console.log(`Reusing existing workspace "${sourceWorkspaceName}" (${existing.workspaceId}) in container ${containerId}`);
+      return existing;
+    }
+
+    // Create a new workspace with the source workspace name
+    const tagmanager = await getTagManagerClient(googleUserId);
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.create({
+        parent: `accounts/${accountId}/containers/${containerId}`,
+        requestBody: {
+          name: sourceWorkspaceName,
+          description: 'Workspace created by GTM Copy application'
+        }
+      }),
+      `Create workspace "${sourceWorkspaceName}" in container ${containerId}`
+    );
+    console.log(`Created new workspace "${sourceWorkspaceName}" in container ${containerId}`);
+    return response.data;
+  } catch (error) {
+    console.error('Error resolving destination workspace:', error);
+    throw error;
+  }
+};
+
+/**
  * Copy a trigger to a target workspace
  * @param {string} googleUserId - Google user ID
  * @param {Object} trigger - Trigger to copy
@@ -1559,11 +1603,12 @@ const copyElements = async (
         console.log(`Rate limiter queue: ${currentStatus.queueLength} requests pending`);
       }
       
-      // Create temporary workspace in target container
-      const tempWorkspace = await createTempWorkspace(
-        googleUserId, 
-        target.accountId, 
-        target.containerId
+      // Resolve destination workspace: reuse by name or create new
+      const tempWorkspace = await resolveDestinationWorkspace(
+        googleUserId,
+        target.accountId,
+        target.containerId,
+        source.workspaceName
       );
       
       const targetPath = `accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`;
