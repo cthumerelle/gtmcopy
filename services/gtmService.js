@@ -341,6 +341,60 @@ const getWorkspaces = async (googleUserId, accountId, containerId) => {
 };
 
 /**
+ * Get workspace status (changes vs published version)
+ * @param {string} googleUserId
+ * @param {string} accountId
+ * @param {string} containerId
+ * @param {string} workspaceId
+ * @returns {Object} - Normalized map: { tags: { id: changeType }, ... }
+ */
+const getWorkspaceStatus = async (googleUserId, accountId, containerId, workspaceId) => {
+  try {
+    const tagmanager = await getTagManagerClient(googleUserId);
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.getStatus({
+        path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Get status for workspace ${workspaceId}`
+    );
+
+    const changes = response.data.workspaceChange || [];
+    const result = {
+      tags: {},
+      triggers: {},
+      variables: {},
+      templates: {},
+      clients: {},
+      transformations: {}
+    };
+
+    const typeMap = {
+      tag:            { key: 'tags',            idField: 'tagId' },
+      trigger:        { key: 'triggers',         idField: 'triggerId' },
+      variable:       { key: 'variables',        idField: 'variableId' },
+      customTemplate: { key: 'templates',        idField: 'templateId' },
+      client:         { key: 'clients',          idField: 'clientId' },
+      transformation: { key: 'transformations',  idField: 'transformationId' }
+    };
+
+    for (const change of changes) {
+      for (const [apiKey, { key, idField }] of Object.entries(typeMap)) {
+        if (change[apiKey]) {
+          const id = change[apiKey][idField];
+          if (id) result[key][id] = change.changeType;
+          break;
+        }
+      }
+    }
+
+    return result;
+  } catch (error) {
+    console.error('Error fetching workspace status:', error);
+    throw error;
+  }
+};
+
+/**
  * Get all custom templates in a workspace
  * @param {string} googleUserId - Google user ID
  * @param {string} accountId - GTM account ID
@@ -1809,6 +1863,7 @@ export {
   getAccounts,
   getContainers,
   getWorkspaces,
+  getWorkspaceStatus,
   getCustomTemplates,
   getTags,
   getTriggers,
