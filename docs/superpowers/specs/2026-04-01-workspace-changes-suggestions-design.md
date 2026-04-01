@@ -19,26 +19,41 @@ Charger automatiquement le statut du workspace source et, en Step 2, pré-cocher
 
 ### 1. Flux de données
 
-Dès que l'utilisateur sélectionne un workspace source, deux appels sont lancés en parallèle :
+Quand l'utilisateur clique "Suivant" depuis Step 1, la fonction `loadSourceElements` (dans `CopyPage.vue`) déclenche en parallèle :
 
 1. **Appels existants** : chargement de tous les éléments du workspace (tags, triggers, variables, templates, clients, transformations)
-2. **Nouvel appel** : `GET /api/gtm/workspaces/:accountId/:containerId/:workspaceId/status`
+2. **Nouvel appel** : `GET /api/gtm/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/status`
    → appelle `accounts.containers.workspaces.getStatus` de l'API GTM v2
 
-Le résultat du status est stocké dans le store Pinia sous `workspaceChanges` :
+#### Forme de la réponse GTM
 
+L'API retourne un tableau plat d'objets de changement :
 ```js
-workspaceChanges: {
-  tags: { "<id>": "added" | "updated" | "deleted" },
-  triggers: { ... },
-  variables: { ... },
-  templates: { ... },
-  clients: { ... },
-  transformations: { ... }
+[
+  { changeType: "added",   tag:      { tagId: "42",  name: "..." } },
+  { changeType: "updated", trigger:  { triggerId: "7", name: "..." } },
+  { changeType: "deleted", variable: { variableId: "3", name: "..." } },
+  // ...
+]
+```
+
+Cette réponse est normalisée côté backend en une map par type :
+```js
+{
+  tags:            { "42": "added" },
+  triggers:        { "7": "updated" },
+  variables:       { "3": "deleted" },
+  templates:       {},
+  clients:         {},
+  transformations: {}
 }
 ```
 
-En Step 2, chaque élément est enrichi avec son `changeStatus` en faisant correspondre par ID. Les éléments sans changement n'ont pas de `changeStatus`.
+Cette map est stockée dans le store Pinia sous `workspaceChanges`.
+
+#### Rendu en Step 2
+
+L'appel `getStatus` est lancé avec `Promise.allSettled` aux côtés des appels d'éléments. Step 2 s'affiche quand **tous** les appels sont terminés (succès ou échec). Les badges sont donc présents dès le premier rendu — il n'y a pas d'affichage en deux temps.
 
 ---
 
@@ -65,22 +80,42 @@ Si le workspace n'a aucune modification, l'interface reste identique à aujourd'
 
 ### 3. Logique de copie — suppressions
 
-Les éléments `deleted` sélectionnés sont transmis dans un champ séparé `deletedElements` (même structure que `selectedElements`) vers le backend.
+#### Transport des suppressions
 
-Dans `gtmService.js`, pour chaque container cible :
+`CopyPage.vue` appelle `api.gtm.copyElements` directement (il ne passe pas par l'action `performCopy` du store). La signature est étendue :
 
-1. Chercher l'élément par nom dans le workspace cible
+```js
+// src/services/api.js
+copyElements(source, targets, elementTypes, selectedElements, deletedElements, autoPublish = true)
+```
+
+`deletedElements` a la même structure que `selectedElements` :
+```js
+deletedElements: {
+  tags: ["42"],
+  triggers: [],
+  variables: ["3"],
+  // ...
+}
+```
+
+#### Exécution dans `gtmService.js`
+
+Pour chaque container cible :
+
+1. Chercher l'élément par **nom exact** (case-sensitive) dans le workspace cible
+   — *Note : c'est une contrainte acceptée. Les IDs différant entre containers, le nom est l'unique identifiant commun.*
 2. Si trouvé → appeler l'endpoint DELETE de l'API GTM
 3. Si non trouvé → skip silencieux (pas d'erreur)
 4. Résultat reporté dans le résumé de copie (succès/échec) comme les autres opérations
 
-Les éléments `deleted` sont **exclus** du flow `create/update` classique.
+Les éléments `deleted` sélectionnés sont **exclus** du flow `create/update` classique.
 
 ---
 
 ### 4. Gestion d'erreurs
 
-- **Échec de `getStatus`** (timeout, permissions) : ignoré silencieusement. Step 2 s'affiche normalement sans suggestions. Pas de blocage.
+- **Échec de `getStatus`** (timeout, permissions) : ignoré silencieusement. `workspaceChanges` reste vide. Step 2 s'affiche normalement sans suggestions. Pas de blocage.
 - **Échec de suppression dans une cible** (permissions, dépendances) : reporté comme erreur dans le résumé de copie. On continue avec les autres éléments.
 
 ---
@@ -89,11 +124,11 @@ Les éléments `deleted` sont **exclus** du flow `create/update` classique.
 
 | Fichier | Modification |
 |---------|-------------|
-| `routes/gtm.js` | Nouvel endpoint `GET /workspaces/:accountId/:containerId/:workspaceId/status` |
+| `routes/gtm.js` | Nouvel endpoint `GET /accounts/:accountId/containers/:containerId/workspaces/:workspaceId/status` |
 | `services/gtmService.js` | Fonction `getWorkspaceStatus()` + gestion `deletedElements` dans `copyElements()` |
-| `src/services/api.js` | Nouvelle méthode `getWorkspaceStatus()` |
+| `src/services/api.js` | Nouvelle méthode `getWorkspaceStatus()` + paramètre `deletedElements` dans `copyElements()` |
 | `src/store/gtm.js` | Nouveau state `workspaceChanges` + action `fetchWorkspaceStatus()` |
-| `src/views/CopyPage.vue` | Appel parallèle du status, pré-sélection, badges visuels dans Step 2 |
+| `src/views/CopyPage.vue` | Appel `getStatus` en parallèle dans `loadSourceElements`, pré-sélection, badges visuels, passage de `deletedElements` à `copyElements` |
 
 ---
 
