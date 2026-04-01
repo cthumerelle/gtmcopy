@@ -172,9 +172,20 @@
                   :value="template.templateId"
                   class="checkbox"
                 />
-                <label :for="`template-${template.templateId}`" class="ml-2 text-sm text-gray-700">
+                <label
+                  :for="`template-${template.templateId}`"
+                  class="ml-2 text-sm"
+                  :class="getChangeStatus('templates', template.templateId) === 'deleted' ? 'line-through text-gray-400' : 'text-gray-700'"
+                >
                   {{ template.name }}
                 </label>
+                <span
+                  v-if="getChangeStatus('templates', template.templateId)"
+                  class="ml-2 text-xs px-1.5 py-0.5 rounded font-medium"
+                  :class="changeBadgeClass(getChangeStatus('templates', template.templateId))"
+                >
+                  {{ changeBadgeLabel(getChangeStatus('templates', template.templateId)) }}
+                </span>
               </div>
               <div v-if="gtmStore.templates.length === 0" class="text-sm text-gray-500 text-center py-2">
                 No templates available
@@ -214,9 +225,20 @@
                   :value="tag.tagId"
                   class="checkbox"
                 />
-                <label :for="`tag-${tag.tagId}`" class="ml-2 text-sm text-gray-700">
+                <label
+                  :for="`tag-${tag.tagId}`"
+                  class="ml-2 text-sm"
+                  :class="getChangeStatus('tags', tag.tagId) === 'deleted' ? 'line-through text-gray-400' : 'text-gray-700'"
+                >
                   {{ tag.name }}
                 </label>
+                <span
+                  v-if="getChangeStatus('tags', tag.tagId)"
+                  class="ml-2 text-xs px-1.5 py-0.5 rounded font-medium"
+                  :class="changeBadgeClass(getChangeStatus('tags', tag.tagId))"
+                >
+                  {{ changeBadgeLabel(getChangeStatus('tags', tag.tagId)) }}
+                </span>
               </div>
               <div v-if="gtmStore.tags.length === 0" class="text-sm text-gray-500 text-center py-2">
                 No tags available
@@ -256,9 +278,20 @@
                   :value="trigger.triggerId"
                   class="checkbox"
                 />
-                <label :for="`trigger-${trigger.triggerId}`" class="ml-2 text-sm text-gray-700">
+                <label
+                  :for="`trigger-${trigger.triggerId}`"
+                  class="ml-2 text-sm"
+                  :class="getChangeStatus('triggers', trigger.triggerId) === 'deleted' ? 'line-through text-gray-400' : 'text-gray-700'"
+                >
                   {{ trigger.name }}
                 </label>
+                <span
+                  v-if="getChangeStatus('triggers', trigger.triggerId)"
+                  class="ml-2 text-xs px-1.5 py-0.5 rounded font-medium"
+                  :class="changeBadgeClass(getChangeStatus('triggers', trigger.triggerId))"
+                >
+                  {{ changeBadgeLabel(getChangeStatus('triggers', trigger.triggerId)) }}
+                </span>
               </div>
               <div v-if="gtmStore.triggers.length === 0" class="text-sm text-gray-500 text-center py-2">
                 No triggers available
@@ -298,9 +331,20 @@
                   :value="variable.variableId"
                   class="checkbox"
                 />
-                <label :for="`variable-${variable.variableId}`" class="ml-2 text-sm text-gray-700">
+                <label
+                  :for="`variable-${variable.variableId}`"
+                  class="ml-2 text-sm"
+                  :class="getChangeStatus('variables', variable.variableId) === 'deleted' ? 'line-through text-gray-400' : 'text-gray-700'"
+                >
                   {{ variable.name }}
                 </label>
+                <span
+                  v-if="getChangeStatus('variables', variable.variableId)"
+                  class="ml-2 text-xs px-1.5 py-0.5 rounded font-medium"
+                  :class="changeBadgeClass(getChangeStatus('variables', variable.variableId))"
+                >
+                  {{ changeBadgeLabel(getChangeStatus('variables', variable.variableId)) }}
+                </span>
               </div>
               <div v-if="gtmStore.variables.length === 0" class="text-sm text-gray-500 text-center py-2">
                 No variables available
@@ -340,9 +384,20 @@
                   :value="client.clientId"
                   class="checkbox"
                 />
-                <label :for="`client-${client.clientId}`" class="ml-2 text-sm text-gray-700">
+                <label
+                  :for="`client-${client.clientId}`"
+                  class="ml-2 text-sm"
+                  :class="getChangeStatus('clients', client.clientId) === 'deleted' ? 'line-through text-gray-400' : 'text-gray-700'"
+                >
                   {{ client.name }}
                 </label>
+                <span
+                  v-if="getChangeStatus('clients', client.clientId)"
+                  class="ml-2 text-xs px-1.5 py-0.5 rounded font-medium"
+                  :class="changeBadgeClass(getChangeStatus('clients', client.clientId))"
+                >
+                  {{ changeBadgeLabel(getChangeStatus('clients', client.clientId)) }}
+                </span>
               </div>
             </div>
           </div>
@@ -379,9 +434,20 @@
                   :value="transformation.transformationId"
                   class="checkbox"
                 />
-                <label :for="`transformation-${transformation.transformationId}`" class="ml-2 text-sm text-gray-700">
+                <label
+                  :for="`transformation-${transformation.transformationId}`"
+                  class="ml-2 text-sm"
+                  :class="getChangeStatus('transformations', transformation.transformationId) === 'deleted' ? 'line-through text-gray-400' : 'text-gray-700'"
+                >
                   {{ transformation.name }}
                 </label>
+                <span
+                  v-if="getChangeStatus('transformations', transformation.transformationId)"
+                  class="ml-2 text-xs px-1.5 py-0.5 rounded font-medium"
+                  :class="changeBadgeClass(getChangeStatus('transformations', transformation.transformationId))"
+                >
+                  {{ changeBadgeLabel(getChangeStatus('transformations', transformation.transformationId)) }}
+                </span>
               </div>
               <div v-if="gtmStore.transformations.length === 0" class="text-sm text-gray-500 text-center py-2">
                 No transformations available
@@ -825,6 +891,62 @@ function deselectAllOfType(type) {
   }
 }
 
+// Returns the changeStatus ('added', 'updated', 'deleted') for an element, or null
+function getChangeStatus(type, id) {
+  return gtmStore.workspaceChanges?.[type]?.[id] || null;
+}
+
+function changeBadgeClass(status) {
+  const map = {
+    added:   'bg-green-100 text-green-800',
+    updated: 'bg-blue-100 text-blue-800',
+    deleted: 'bg-red-100 text-red-800',
+  };
+  return map[status] || '';
+}
+
+function changeBadgeLabel(status) {
+  const map = {
+    added:   'Nouveau',
+    updated: 'Modifié',
+    deleted: 'Suppression ⚠',
+  };
+  return map[status] || '';
+}
+
+// Pre-selects elements that have changes in the workspace.
+// Called after loadSourceElements resolves.
+function preSelectChangedElements() {
+  const wc = gtmStore.workspaceChanges;
+  if (!wc) return;
+  const hasChanges = Object.values(wc).some(map => Object.keys(map).length > 0);
+  if (!hasChanges) return;
+
+  const idFields = {
+    templates: 'templateId',
+    tags: 'tagId',
+    triggers: 'triggerId',
+    variables: 'variableId',
+    clients: 'clientId',
+    transformations: 'transformationId',
+  };
+
+  const storeList = {
+    templates: gtmStore.templates,
+    tags: gtmStore.tags,
+    triggers: gtmStore.triggers,
+    variables: gtmStore.variables,
+    clients: gtmStore.clients,
+    transformations: gtmStore.transformations,
+  };
+
+  for (const [type, idField] of Object.entries(idFields)) {
+    selectedElements.value[type] = storeList[type]
+      .filter(el => wc[type][el[idField]])
+      .map(el => el[idField]);
+  }
+}
+
 // Helper methods
 function getAccountName(accountId) {
   const account = gtmStore.accounts.find(a => a.accountId === accountId);
@@ -977,9 +1099,10 @@ function prevStep() {
 async function loadSourceElements() {
   loading.value = true;
   error.value = null;
-  
+
   try {
     await gtmStore.fetchSourceElements();
+    preSelectChangedElements();
     currentStep.value += 1;
   } catch(err) {
     error.value = `Failed to load source elements: ${err.message}`;
@@ -991,32 +1114,62 @@ async function loadSourceElements() {
 async function performCopy() {
   copyInProgress.value = true;
   error.value = null;
-  
+
   try {
+    // Separate deleted elements from create/update elements
+    const wc = gtmStore.workspaceChanges;
+    const idFields = {
+      templates: { list: gtmStore.templates, id: 'templateId' },
+      tags:      { list: gtmStore.tags,      id: 'tagId' },
+      triggers:  { list: gtmStore.triggers,  id: 'triggerId' },
+      variables: { list: gtmStore.variables, id: 'variableId' },
+      clients:   { list: gtmStore.clients,   id: 'clientId' },
+      transformations: { list: gtmStore.transformations, id: 'transformationId' },
+    };
+
+    const filteredSelectedElements = {};
+    const deletedElementNames = {};
+
+    for (const [type, { list, id }] of Object.entries(idFields)) {
+      const deletedIds = Object.entries(wc[type] || {})
+        .filter(([, s]) => s === 'deleted')
+        .map(([elId]) => elId);
+
+      filteredSelectedElements[type] = (selectedElements.value[type] || [])
+        .filter(elId => !deletedIds.includes(elId));
+
+      const selectedDeletedIds = (selectedElements.value[type] || [])
+        .filter(elId => deletedIds.includes(elId));
+      deletedElementNames[type] = selectedDeletedIds
+        .map(elId => list.find(el => el[id] === elId)?.name)
+        .filter(Boolean);
+    }
+
     // Determine which element types to copy based on selections
     const activeElementTypes = [];
-    if (selectedElements.value.templates.length > 0) activeElementTypes.push('templates');
-    if (selectedElements.value.tags.length > 0) activeElementTypes.push('tags');
-    if (selectedElements.value.triggers.length > 0) activeElementTypes.push('triggers');
-    if (selectedElements.value.variables.length > 0) activeElementTypes.push('variables');
-    if (selectedElements.value.clients.length > 0) activeElementTypes.push('clients');
-    if (selectedElements.value.transformations.length > 0) activeElementTypes.push('transformations');
+    if (filteredSelectedElements.templates?.length > 0) activeElementTypes.push('templates');
+    if (filteredSelectedElements.tags?.length > 0) activeElementTypes.push('tags');
+    if (filteredSelectedElements.triggers?.length > 0) activeElementTypes.push('triggers');
+    if (filteredSelectedElements.variables?.length > 0) activeElementTypes.push('variables');
+    if (filteredSelectedElements.clients?.length > 0) activeElementTypes.push('clients');
+    if (filteredSelectedElements.transformations?.length > 0) activeElementTypes.push('transformations');
 
     // Save the active element types to the store
     gtmStore.setSelectedElementTypes(activeElementTypes);
-    
+
     // Make sure the selected elements are up to date in the store
-    gtmStore.selectedElements = { ...selectedElements.value };
-    
+    gtmStore.selectedElements = { ...filteredSelectedElements };
+
     // Use the API service directly to ensure selections are passed correctly
     const response = await api.gtm.copyElements(
       gtmStore.selectedSource,
       gtmStore.selectedTargets,
       activeElementTypes,
-      selectedElements.value, // Pass the selected elements directly
-      autoPublish.value // Pass the auto-publish option
+      filteredSelectedElements,
+      deletedElementNames,
+      autoPublish.value
     );
-    
+
     copyResults.value = response.data.result;
     copyCompleted.value = true;
   } catch(err) {
