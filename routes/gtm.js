@@ -182,7 +182,10 @@ router.post('/copy', authenticate, async (req, res) => {
     }
     
     const hasElementTypes = elementTypes && Array.isArray(elementTypes) && elementTypes.length > 0;
-    const hasDeletions = deletedElementNames && Object.values(deletedElementNames).some(arr => arr.length > 0);
+    const hasDeletions = deletedElementNames
+      && typeof deletedElementNames === 'object'
+      && !Array.isArray(deletedElementNames)
+      && Object.values(deletedElementNames).some(arr => Array.isArray(arr) && arr.length > 0);
     if (!hasElementTypes && !hasDeletions) {
       return res.status(400).json({ message: 'At least one element to copy or delete is required' });
     }
@@ -194,7 +197,7 @@ router.post('/copy', authenticate, async (req, res) => {
       targets,
       elementTypes,
       selectedElements, // Pass the selected element IDs
-      deletedElementNames,   // ← add this
+      deletedElementNames,
       autoPublish // Pass the auto-publish option
     );
     

@@ -1391,6 +1391,7 @@ const deleteWorkspace = async (googleUserId, accountId, containerId, workspaceId
  * @param {Array} targets - Target containers
  * @param {Array} elementTypes - Types of elements to copy (templates, tags, triggers, variables)
  * @param {Object} selectedElements - Object containing arrays of selected element IDs by type
+ * @param {Object|null} deletedElementNames - Object containing arrays of element names to delete by type
  * @param {boolean} autoPublish - Whether to automatically publish the workspace after copying
  * @returns {Object} - Copy results
  */
@@ -1539,6 +1540,12 @@ const copyElements = async (
     requestsInLastMinute: rateLimiterStatus.requestsInLastMinute,
     canMakeRequest: rateLimiterStatus.canMakeRequest
   });
+
+  // Hoist tag manager client for deletion phase (avoid repeated auth per target)
+  let tagmanager = null;
+  if (deletedElementNames) {
+    tagmanager = await getTagManagerClient(googleUserId);
+  }
 
   // Process each target container
   for (let i = 0; i < targets.length; i++) {
@@ -1721,7 +1728,6 @@ const copyElements = async (
 
       // Handle deletions
       if (deletedElementNames) {
-        const tagmanager = await getTagManagerClient(googleUserId);
         const typesToDelete = ['templates', 'tags', 'triggers', 'variables', 'clients', 'transformations'];
 
         for (const type of typesToDelete) {
