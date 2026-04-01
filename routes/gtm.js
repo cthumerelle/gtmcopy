@@ -170,7 +170,7 @@ router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId
  */
 router.post('/copy', authenticate, async (req, res) => {
   try {
-    const { source, targets, elementTypes, selectedElements, autoPublish = true } = req.body;
+    const { source, targets, elementTypes, selectedElements, deletedElementNames, autoPublish = true } = req.body;
     
     // Validate required fields
     if (!source || !source.accountId || !source.containerId || !source.workspaceId) {
@@ -181,8 +181,10 @@ router.post('/copy', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'At least one target container is required' });
     }
     
-    if (!elementTypes || !Array.isArray(elementTypes) || elementTypes.length === 0) {
-      return res.status(400).json({ message: 'At least one element type is required' });
+    const hasElementTypes = elementTypes && Array.isArray(elementTypes) && elementTypes.length > 0;
+    const hasDeletions = deletedElementNames && Object.values(deletedElementNames).some(arr => arr.length > 0);
+    if (!hasElementTypes && !hasDeletions) {
+      return res.status(400).json({ message: 'At least one element to copy or delete is required' });
     }
     
     // Perform the copy operation
@@ -192,6 +194,7 @@ router.post('/copy', authenticate, async (req, res) => {
       targets,
       elementTypes,
       selectedElements, // Pass the selected element IDs
+      deletedElementNames,   // ← add this
       autoPublish // Pass the auto-publish option
     );
     

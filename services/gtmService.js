@@ -395,6 +395,44 @@ const getWorkspaceStatus = async (googleUserId, accountId, containerId, workspac
 };
 
 /**
+ * Find an element by name in a workspace and delete it.
+ * Returns null silently if the element is not found.
+ * @param {Object} tagmanager - authenticated tagmanager client
+ * @param {string} targetPath - e.g. "accounts/X/containers/Y/workspaces/Z"
+ * @param {string} elementType - one of: tags, triggers, variables, templates, clients, transformations
+ * @param {string} elementName - exact element name (case-sensitive)
+ * @returns {Object|null}
+ */
+const deleteElementFromWorkspace = async (tagmanager, targetPath, elementType, elementName) => {
+  const typeConfig = {
+    tags:            { listKey: 'tag',            idField: 'tagId',            resource: tagmanager.accounts.containers.workspaces.tags },
+    triggers:        { listKey: 'trigger',        idField: 'triggerId',        resource: tagmanager.accounts.containers.workspaces.triggers },
+    variables:       { listKey: 'variable',       idField: 'variableId',       resource: tagmanager.accounts.containers.workspaces.variables },
+    templates:       { listKey: 'template',       idField: 'templateId',       resource: tagmanager.accounts.containers.workspaces.templates },
+    clients:         { listKey: 'client',         idField: 'clientId',         resource: tagmanager.accounts.containers.workspaces.clients },
+    transformations: { listKey: 'transformation', idField: 'transformationId', resource: tagmanager.accounts.containers.workspaces.transformations },
+  };
+
+  const config = typeConfig[elementType];
+  if (!config) return null;
+
+  const listResponse = await makeRateLimitedRequest(
+    () => config.resource.list({ parent: targetPath }),
+    `List ${elementType} for deletion`
+  );
+  const elements = listResponse.data[config.listKey] || [];
+  const match = elements.find(el => el.name === elementName);
+  if (!match) return null;
+
+  await makeRateLimitedRequest(
+    () => config.resource.delete({ path: match.path }),
+    `Delete ${elementType} "${elementName}"`
+  );
+
+  return { type: elementType, name: elementName, status: 'deleted' };
+};
+
+/**
  * Get all custom templates in a workspace
  * @param {string} googleUserId - Google user ID
  * @param {string} accountId - GTM account ID
@@ -1357,11 +1395,12 @@ const deleteWorkspace = async (googleUserId, accountId, containerId, workspaceId
  * @returns {Object} - Copy results
  */
 const copyElements = async (
-  googleUserId, 
-  source, 
-  targets, 
+  googleUserId,
+  source,
+  targets,
   elementTypes,
   selectedElements = null,
+  deletedElementNames = null,   // ← add this parameter
   autoPublish = true
 ) => {
   const results = [];
@@ -1677,6 +1716,30 @@ const copyElements = async (
             name: element.name,
             error: errorMessage
           });
+        }
+      }
+
+      // Handle deletions
+      if (deletedElementNames) {
+        const tagmanager = await getTagManagerClient(googleUserId);
+        const typesToDelete = ['templates', 'tags', 'triggers', 'variables', 'clients', 'transformations'];
+
+        for (const type of typesToDelete) {
+          const names = deletedElementNames[type] || [];
+          for (const name of names) {
+            try {
+              const result = await deleteElementFromWorkspace(tagmanager, targetPath, type, name);
+              if (result) {
+                copiedElements.push(result);
+                console.log(`Deleted ${type} "${name}" from ${target.containerId}`);
+              } else {
+                console.log(`${type} "${name}" not found in target ${target.containerId}, skipping`);
+              }
+            } catch (err) {
+              console.error(`Error deleting ${type} "${name}":`, err);
+              errors.push({ type, name, error: `Failed to delete: ${err.message}` });
+            }
+          }
         }
       }
 
