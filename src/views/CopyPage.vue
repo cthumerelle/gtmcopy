@@ -1016,9 +1016,13 @@ async function handleContainerChange() {
 
 async function handleWorkspaceChange() {
   if (!source.value.workspaceId) return;
-  
-  // Save selection to store
-  gtmStore.setSelectedSource(source.value);
+
+  // Enrich source with workspace name for destination workspace resolution
+  const selectedWorkspace = gtmStore.workspaces.find(w => w.workspaceId === source.value.workspaceId);
+  gtmStore.setSelectedSource({
+    ...source.value,
+    workspaceName: selectedWorkspace?.name ?? ''
+  });
 }
 
 async function handleTargetAccountChange() {
