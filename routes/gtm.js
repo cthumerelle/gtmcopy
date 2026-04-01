@@ -52,6 +52,22 @@ router.get('/accounts/:accountId/containers/:containerId/workspaces', authentica
 });
 
 /**
+ * @route   GET /api/gtm/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/status
+ * @desc    Get workspace changes vs published version
+ * @access  Private
+ */
+router.get('/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/status', authenticate, async (req, res) => {
+  try {
+    const { accountId, containerId, workspaceId } = req.params;
+    const status = await gtmService.getWorkspaceStatus(req.user.googleUserId, accountId, containerId, workspaceId);
+    res.status(200).json({ status });
+  } catch (error) {
+    console.error('Error fetching workspace status:', error);
+    res.status(500).json({ message: 'Failed to fetch workspace status', error: error.message });
+  }
+});
+
+/**
  * @route   GET /api/gtm/accounts/:accountId/containers/:containerId/workspaces/:workspaceId/templates
  * @desc    Get all custom templates in a workspace
  * @access  Private
