@@ -891,9 +891,22 @@ function deselectAllOfType(type) {
   }
 }
 
+// Flat lookup map computed once per workspace update: "type:id" → status
+// Avoids repeated reactive traversal when template bindings call getChangeStatus multiple times per row.
+const changeStatusCache = computed(() => {
+  const wc = gtmStore.workspaceChanges;
+  const cache = {};
+  for (const [type, ids] of Object.entries(wc)) {
+    for (const [id, status] of Object.entries(ids || {})) {
+      cache[`${type}:${id}`] = status;
+    }
+  }
+  return cache;
+});
+
 // Returns the changeStatus ('added', 'updated', 'deleted') for an element, or null
 function getChangeStatus(type, id) {
-  return gtmStore.workspaceChanges?.[type]?.[id] || null;
+  return changeStatusCache.value[`${type}:${id}`] || null;
 }
 
 function changeBadgeClass(status) {
@@ -942,7 +955,7 @@ function preSelectChangedElements() {
 
   for (const [type, idField] of Object.entries(idFields)) {
     selectedElements.value[type] = storeList[type]
-      .filter(el => wc[type][el[idField]])
+      .filter(el => wc[type]?.[el[idField]])
       .map(el => el[idField]);
   }
 }
