@@ -29,6 +29,8 @@ gtmStore.setSelectedSource({
 });
 ```
 
+Note : le ref local `source` dans le composant n'est intentionnellement **pas** étendu avec `workspaceName`. L'enrichissement ne circule que via le store. L'affichage du nom utilise déjà `getWorkspaceName(source.workspaceId)` qui résout depuis `gtmStore.workspaces`, donc aucune régression UI.
+
 ### 2. Store — `src/store/gtm.js`
 
 `selectedSource` est étendu avec un champ `workspaceName` :
@@ -44,35 +46,43 @@ const selectedSource = ref({
 
 ### 3. Backend — `services/gtmService.js`
 
-Renommer `createTempWorkspace` en `resolveDestinationWorkspace` et ajouter le paramètre `sourceWorkspaceName` :
+`createTempWorkspace` est **conservée** comme helper privé (inchangée). Une nouvelle fonction `resolveDestinationWorkspace` est ajoutée qui la délègue pour le cas "Default Workspace", et implémente la logique de recherche/création sinon.
+
+`resolveDestinationWorkspace` suit la même convention de gestion d'erreurs que les autres fonctions du service (try/catch + console.error + re-throw) :
 
 ```js
 const resolveDestinationWorkspace = async (googleUserId, accountId, containerId, sourceWorkspaceName) => {
-  // Default Workspace → comportement actuel
-  if (!sourceWorkspaceName || sourceWorkspaceName === 'Default Workspace') {
-    return createTempWorkspace(googleUserId, accountId, containerId);
-  }
+  try {
+    // Default Workspace ou workspaceName vide → comportement actuel
+    if (!sourceWorkspaceName || sourceWorkspaceName === 'Default Workspace') {
+      return await createTempWorkspace(googleUserId, accountId, containerId);
+    }
 
-  // Chercher un workspace existant avec ce nom
-  const existingWorkspaces = await getWorkspaces(googleUserId, accountId, containerId);
-  const existing = existingWorkspaces.find(w => w.name === sourceWorkspaceName);
-  if (existing) {
-    return existing;
-  }
+    // Chercher un workspace existant avec ce nom
+    const existingWorkspaces = await getWorkspaces(googleUserId, accountId, containerId);
+    const existing = existingWorkspaces.find(w => w.name === sourceWorkspaceName);
+    if (existing) {
+      console.log(`Reusing existing workspace "${sourceWorkspaceName}" (${existing.workspaceId})`);
+      return existing;
+    }
 
-  // Créer un nouveau workspace avec le nom source
-  const tagmanager = await getTagManagerClient(googleUserId);
-  const response = await makeRateLimitedRequest(
-    () => tagmanager.accounts.containers.workspaces.create({
-      parent: `accounts/${accountId}/containers/${containerId}`,
-      requestBody: {
-        name: sourceWorkspaceName,
-        description: 'Workspace créé par GTM Copy'
-      }
-    }),
-    `Create workspace "${sourceWorkspaceName}" in container ${containerId}`
-  );
-  return response.data;
+    // Créer un nouveau workspace avec le nom source
+    const tagmanager = await getTagManagerClient(googleUserId);
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.create({
+        parent: `accounts/${accountId}/containers/${containerId}`,
+        requestBody: {
+          name: sourceWorkspaceName,
+          description: 'Workspace créé par GTM Copy'
+        }
+      }),
+      `Create workspace "${sourceWorkspaceName}" in container ${containerId}`
+    );
+    return response.data;
+  } catch (error) {
+    console.error('Error resolving destination workspace:', error);
+    throw error;
+  }
 };
 ```
 
@@ -103,6 +113,8 @@ Aucune modification. `source.workspaceName` est transmis via le corps de la requ
 { "source": { "accountId": "...", "containerId": "...", "workspaceId": "...", "workspaceName": "Mon workspace" } }
 ```
 
+Le champ `workspaceName` est optionnel côté backend : son absence ou une valeur vide (`""`) déclenche le fallback `temp-copy-{timestamp}`, ce qui garantit la rétrocompatibilité avec d'éventuels anciens clients.
+
 ## Cas limites
 
 | Cas | Comportement |
@@ -110,10 +122,13 @@ Aucune modification. `source.workspaceName` est transmis via le corps de la requ
 | Source = "Default Workspace" | `temp-copy-{timestamp}` (inchangé) |
 | Workspace existant dans destination | Réutilisation, copie dans l'existant |
 | Workspace inexistant dans destination | Création avec le nom source |
-| `workspaceName` absent / null | Fallback vers comportement actuel |
+| `workspaceName` absent / null / vide | Fallback vers comportement actuel |
+| `workspaceId` localStorage invalide (workspace supprimé) | `selectedWorkspace` → undefined → `workspaceName: ''` → fallback `temp-copy-{timestamp}` |
+| `workspaceName` localStorage réfère un workspace supprimé depuis | `getWorkspaces` ne le trouve pas → création d'un nouveau workspace avec ce nom |
+| Erreur API lors de `getWorkspaces` ou création | Exception loggée et re-throwée, la copie échoue proprement |
 
 ## Fichiers modifiés
 
 - `src/views/CopyPage.vue` — enrichissement de `source` dans `handleWorkspaceChange`
 - `src/store/gtm.js` — ajout de `workspaceName` dans `selectedSource`
-- `services/gtmService.js` — nouvelle fonction `resolveDestinationWorkspace`, mise à jour de l'appel dans `copyElements`
+- `services/gtmService.js` — nouvelle fonction `resolveDestinationWorkspace` (helper `createTempWorkspace` conservé), mise à jour de l'appel dans `copyElements`
