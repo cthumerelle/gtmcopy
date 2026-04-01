@@ -22,7 +22,8 @@ export const useGtmStore = defineStore('gtm', () => {
   const selectedSource = ref({
     accountId: null,
     containerId: null,
-    workspaceId: null
+    workspaceId: null,
+    workspaceName: null
   });
   
   const selectedTargets = ref([]);
@@ -301,6 +302,12 @@ export const useGtmStore = defineStore('gtm', () => {
     ]);
   }
 
+  /**
+   * Fetches workspace change status and stores it in `workspaceChanges`.
+   * Intentionally swallows errors and resets to empty state on failure
+   * (suggestions become unavailable but the copy flow is not blocked).
+   * Does NOT set the store-level `loading` or `error` refs.
+   */
   async function fetchWorkspaceStatus(accountId, containerId, workspaceId) {
     try {
       const response = await api.gtm.getWorkspaceStatus(accountId, containerId, workspaceId);
