@@ -1,0 +1,12 @@
+{
+  "planPath": "docs/superpowers/plans/2026-04-01-workspace-changes-suggestions.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add getWorkspaceStatus to services/gtmService.js", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Add status route to routes/gtm.js", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Add deletion support to gtmService.js and routes/gtm.js", "status": "pending", "blockedBy": [1]},
+    {"id": 4, "subject": "Task 4: Update src/services/api.js", "status": "pending", "blockedBy": [2, 3]},
+    {"id": 5, "subject": "Task 5: Update src/store/gtm.js", "status": "pending", "blockedBy": [4]},
+    {"id": 6, "subject": "Task 6: Update src/views/CopyPage.vue — badges, pre-check, deletion propagation", "status": "pending", "blockedBy": [5]}
+  ],
+  "lastUpdated": "2026-04-01T00:00:00Z"
+}
