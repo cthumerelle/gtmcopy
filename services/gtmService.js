@@ -1128,7 +1128,7 @@ const resolveDestinationWorkspace = async (googleUserId, accountId, containerId,
   try {
     // Default Workspace or missing name → keep existing temp-copy-{timestamp} behavior
     if (!sourceWorkspaceName || sourceWorkspaceName === 'Default Workspace') {
-      return await createTempWorkspace(googleUserId, accountId, containerId);
+      return { workspace: await createTempWorkspace(googleUserId, accountId, containerId), reused: false };
     }
 
     // Look for an existing workspace with the same name in the destination container
@@ -1136,7 +1136,7 @@ const resolveDestinationWorkspace = async (googleUserId, accountId, containerId,
     const existing = (existingWorkspaces || []).find(w => w.name === sourceWorkspaceName);
     if (existing) {
       console.log(`Reusing existing workspace "${sourceWorkspaceName}" (${existing.workspaceId}) in container ${containerId}`);
-      return existing;
+      return { workspace: existing, reused: true };
     }
 
     // Create a new workspace with the source workspace name
@@ -1152,7 +1152,7 @@ const resolveDestinationWorkspace = async (googleUserId, accountId, containerId,
       `Create workspace "${sourceWorkspaceName}" in container ${containerId}`
     );
     console.log(`Created new workspace "${sourceWorkspaceName}" (${response.data.workspaceId}) in container ${containerId}`);
-    return response.data;
+    return { workspace: response.data, reused: false };
   } catch (error) {
     console.error('Error resolving destination workspace:', error);
     throw error;
@@ -1604,13 +1604,13 @@ const copyElements = async (
       }
       
       // Resolve destination workspace: reuse by name or create new
-      const tempWorkspace = await resolveDestinationWorkspace(
+      const { workspace: tempWorkspace, reused: workspaceReused } = await resolveDestinationWorkspace(
         googleUserId,
         target.accountId,
         target.containerId,
         source.workspaceName
       );
-      
+
       const targetPath = `accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`;
       const copiedElements = [];
       let errors = [];
@@ -1901,6 +1901,7 @@ const copyElements = async (
           containerId: target.containerId
         },
         workspace: tempWorkspace,
+        workspaceReused,
         published: publishResult !== null,
         workspacePreserved: copySucceeded && !autoPublish,
         elements: {

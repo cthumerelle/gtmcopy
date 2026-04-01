@@ -637,7 +637,12 @@
               <div v-if="result.workspacePreserved" class="mt-2 p-3 bg-blue-50 text-blue-800 rounded-md">
                 <p class="text-sm font-medium">🔍 Workspace disponible pour recette</p>
                 <p class="text-xs mt-1">
-                  Le workspace "{{ result.workspace?.name }}" a été créé avec les éléments copiés.
+                  <template v-if="result.workspaceReused">
+                    Les éléments ont été copiés dans le workspace existant "{{ result.workspace?.name }}".
+                  </template>
+                  <template v-else>
+                    Le workspace "{{ result.workspace?.name }}" a été créé avec les éléments copiés.
+                  </template>
                   Vous pouvez le consulter dans GTM pour vérification avant publication manuelle.
                 </p>
               </div>
