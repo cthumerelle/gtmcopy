@@ -166,8 +166,8 @@ class GTMRateLimiter {
     const isRecoverable = this.isRecoverableError(error);
     const isQuotaError = this.isQuotaError(error);
     
-    // For quota errors, retry indefinitely. For others, limit to 5 attempts
-    const maxRetries = isQuotaError ? Infinity : 5;
+    // For quota errors, limit to 10 attempts to avoid infinite loops. For others, limit to 5 attempts
+    const maxRetries = isQuotaError ? 10 : 5;
     const hasRetriesLeft = request.retryCount < maxRetries;
     const shouldRetry = isRecoverable && hasRetriesLeft;
 
@@ -208,14 +208,30 @@ class GTMRateLimiter {
    * @returns {boolean}
    */
   isQuotaError(error) {
-    // Must have status 429 to be a quota error
-    if (error.response?.status !== 429) return false;
-    
-    // Check for quota-specific metadata (most reliable)
+    const status = error.response?.status;
     const errorData = error.response?.data?.error || {};
-    const details = errorData.details || [];
     
-    // True quota errors have quota metadata
+    // 1. Any 429 Too Many Requests is a rate limit
+    if (status === 429) return true;
+    
+    // 2. Google APIs sometimes return 403 for quota/rate limits
+    if (status === 403) {
+      const message = (errorData.message || '').toLowerCase();
+      if (message.includes('quota') || message.includes('rate limit')) {
+        return true;
+      }
+      
+      const errors = errorData.errors || [];
+      const isRateLimitReason = errors.some(err => 
+        err.reason === 'rateLimitExceeded' || 
+        err.reason === 'userRateLimitExceeded' ||
+        err.reason === 'dailyLimitExceeded'
+      );
+      if (isRateLimitReason) return true;
+    }
+    
+    // 3. Keep existing strict check for other cases
+    const details = errorData.details || [];
     return details.some(detail =>
       detail.metadata?.quota_limit || detail.metadata?.quota_metric
     );
