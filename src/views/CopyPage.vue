@@ -505,15 +505,16 @@
           <!-- Target container selection -->
           <div v-if="currentTarget.accountId" class="form-group">
             <label for="target-container" class="form-label">Target Container</label>
-            <select 
-              id="target-container" 
-              v-model="currentTarget.containerId" 
+            <select
+              id="target-container"
+              v-model="currentTarget.containerId"
+              @change="addTarget"
               class="form-input"
             >
               <option value="">Select a container</option>
-              <option 
-                v-for="container in targetContainers" 
-                :key="container.containerId" 
+              <option
+                v-for="container in targetContainers"
+                :key="container.containerId"
                 :value="container.containerId"
               >
                 {{ container.name }} ({{ container.publicId }})
@@ -521,39 +522,44 @@
             </select>
           </div>
           
-          <!-- Add target button -->
-          <div v-if="currentTarget.containerId" class="mt-4">
-            <button @click="addTarget" class="btn-secondary">
-              Add Target
-            </button>
-          </div>
-          
-          <!-- Selected targets list -->
+          <!-- Selected targets grid -->
           <div v-if="targets.length > 0" class="mt-8">
-            <h3 class="font-medium text-gray-700 mb-4">Selected Targets:</h3>
-            
-            <div class="space-y-3">
-              <div 
-                v-for="(target, index) in targets" 
-                :key="index"
-                class="flex items-center justify-between p-3 bg-gray-50 rounded-md"
+            <h3 class="font-medium text-gray-700 mb-4">
+              Destinations sélectionnées
+              <span class="ml-2 inline-flex items-center justify-center w-5 h-5 text-xs font-bold text-white bg-primary-600 rounded-full">{{ targets.length }}</span>
+            </h3>
+
+            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+              <div
+                v-for="(target, index) in targets"
+                :key="target.containerId"
+                :class="[
+                  'relative flex flex-col gap-1 p-3 bg-white border rounded-lg shadow-sm transition-all duration-300',
+                  newlyAddedContainerId === target.containerId
+                    ? 'border-primary-400 ring-2 ring-primary-200 scale-105 shadow-md'
+                    : 'border-gray-200 hover:border-gray-300'
+                ]"
               >
-                <div>
-                  <div class="font-medium">
-                    {{ getAccountName(target.accountId) }}
-                  </div>
-                  <div class="text-sm text-gray-600">
-                    {{ getContainerName(target.containerId) }}
-                  </div>
-                </div>
-                <button 
-                  @click="removeTarget(index)" 
-                  class="text-red-600 hover:text-red-800"
+                <!-- Remove button -->
+                <button
+                  @click="removeTarget(index)"
+                  class="absolute top-2 right-2 text-gray-300 hover:text-red-500 transition-colors"
+                  title="Retirer"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
+
+                <!-- Container icon -->
+                <div class="text-primary-500 mb-1">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                  </svg>
+                </div>
+
+                <div class="text-xs text-gray-400 leading-tight truncate pr-5">{{ getAccountName(target.accountId) }}</div>
+                <div class="text-sm font-medium text-gray-800 leading-tight truncate pr-5">{{ getContainerName(target.containerId) }}</div>
               </div>
             </div>
           </div>
@@ -766,7 +772,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
 import { useGtmStore } from '../store/gtm';
 import api from '../services/api';
@@ -813,6 +819,7 @@ const totalSelectedElements = computed(() => {
 
 // Target selection
 const targets = ref([]);
+const newlyAddedContainerId = ref(null);
 const currentTarget = ref({
   accountId: '',
   containerId: ''
@@ -820,11 +827,15 @@ const currentTarget = ref({
 
 const targetContainers = computed(() => {
   if (!currentTarget.value.accountId) return [];
-  
-  // Filter out the source container to avoid copying to itself
+
   return gtmStore.containers.filter(container => {
+    // Filter out the source container
     if (source.value.accountId === currentTarget.value.accountId &&
         source.value.containerId === container.containerId) {
+      return false;
+    }
+    // Filter out already-selected destinations
+    if (targets.value.some(t => t.containerId === container.containerId)) {
       return false;
     }
     return true;
@@ -1057,17 +1068,25 @@ function addTarget() {
   );
   
   if (!targetExists) {
+    const addedContainerId = currentTarget.value.containerId;
+
     targets.value.push({
       accountId: currentTarget.value.accountId,
-      containerId: currentTarget.value.containerId,
+      containerId: addedContainerId,
     });
-    
+
     // Save selection to store
     gtmStore.addTarget({
       accountId: currentTarget.value.accountId,
-      containerId: currentTarget.value.containerId,
+      containerId: addedContainerId,
     });
-    
+
+    // Trigger add animation
+    nextTick(() => {
+      newlyAddedContainerId.value = addedContainerId;
+      setTimeout(() => { newlyAddedContainerId.value = null; }, 600);
+    });
+
     // Reset current target for next addition
     currentTarget.value = {
       accountId: currentTarget.value.accountId,
