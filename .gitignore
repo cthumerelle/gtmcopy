@@ -48,3 +48,8 @@ lerna-debug.log*
 # Temporary files
 *.tmp
 *.temp
+
+# Claude Code Configuration
+.claude-config/
+.claude/commands
+.claude/hooks

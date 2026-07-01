@@ -1252,9 +1252,16 @@ onMounted(async () => {
       
       if (source.value.containerId) {
         await gtmStore.fetchWorkspaces(
-          source.value.accountId, 
+          source.value.accountId,
           source.value.containerId
         );
+
+        // Re-enrich workspaceName from the freshly loaded list, in case the stored
+        // source predates the workspaceName field or was saved without it.
+        // handleWorkspaceChange() only runs on dropdown change, not on remount.
+        if (source.value.workspaceId) {
+          await handleWorkspaceChange();
+        }
       }
     }
     

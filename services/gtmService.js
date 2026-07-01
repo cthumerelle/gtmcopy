@@ -932,22 +932,33 @@ const getDetails = async (googleUserId, copyId) => {
  * @param {string} accountId - GTM account ID
  * @param {string} containerId - GTM container ID
  * @param {string} workspaceId - GTM workspace ID
+ * @param {string} [sourceWorkspaceName] - Name of the source workspace, used to name the published version
  * @returns {Object} - Publish result
  */
-const publishWorkspace = async (googleUserId, accountId, containerId, workspaceId) => {
+const publishWorkspace = async (googleUserId, accountId, containerId, workspaceId, sourceWorkspaceName) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
-    
+
     // Log detailed information about the publish attempt for debugging
     console.log(`Attempting to publish workspace - Account: ${accountId}, Container: ${containerId}, Workspace: ${workspaceId}`);
-    
+
+    // Preserve the source workspace name in the published version so it stays
+    // visible in the GTM version history (the workspace itself is deleted on publish)
+    const timestamp = new Date().toISOString();
+    const versionName = sourceWorkspaceName
+      ? `${sourceWorkspaceName} - GTM Copy ${timestamp}`
+      : `GTM Copy Publish ${timestamp}`;
+    const versionNotes = sourceWorkspaceName
+      ? `Published by GTM Copy application from workspace "${sourceWorkspaceName}"`
+      : 'Published by GTM Copy application';
+
     // Step 1: Create a version from the workspace
     const versionResponse = await makeRateLimitedRequest(
       () => tagmanager.accounts.containers.workspaces.create_version({
         path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`,
         requestBody: {
-          name: `GTM Copy Publish ${new Date().toISOString()}`,
-          notes: 'Published by GTM Copy application'
+          name: versionName,
+          notes: versionNotes
         }
       }),
       `Create version in container ${containerId}`
@@ -1805,10 +1816,11 @@ const copyElements = async (
           console.log(`Publishing path: accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`);
           
           publishResult = await publishWorkspace(
-            googleUserId, 
-            target.accountId, 
-            target.containerId, 
-            tempWorkspace.workspaceId
+            googleUserId,
+            target.accountId,
+            target.containerId,
+            tempWorkspace.workspaceId,
+            source.workspaceName
           );
           console.log("Publish success:", !!publishResult);
         } catch (error) {
