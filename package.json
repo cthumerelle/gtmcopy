@@ -7,7 +7,8 @@
     "dev": "node server.js",
     "client": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test 'tests/**/*.test.js'"
   },
   "dependencies": {
     "axios": "^1.6.2",

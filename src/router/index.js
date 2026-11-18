@@ -6,6 +6,7 @@ const Login = () => import('../views/Login.vue');
 const Dashboard = () => import('../views/Dashboard.vue');
 const CopyPage = () => import('../views/CopyPage.vue');
 const History = () => import('../views/History.vue');
+const CopyReport = () => import('../views/CopyReport.vue');
 const NotFound = () => import('../views/NotFound.vue');
 const AuthCallback = () => import('../views/AuthCallback.vue');
 
@@ -37,6 +38,12 @@ const routes = [
     path: '/history',
     name: 'history',
     component: History,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/history/:id',
+    name: 'history-report',
+    component: CopyReport,
     meta: { requiresAuth: true }
   },
   {

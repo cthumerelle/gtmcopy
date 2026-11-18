@@ -581,90 +581,11 @@
       <div v-else-if="currentStep === 3" class="space-y-6">
         <h2 class="text-xl font-semibold text-gray-800 mb-4">Step 4: Review and Copy</h2>
         
-        <div v-if="copyInProgress" class="text-center py-12">
-          <div class="flex justify-center mb-4">
-            <div class="animate-spin h-10 w-10 text-primary-600">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-            </div>
-          </div>
-          <h3 class="text-lg font-medium mb-2">Copying in progress...</h3>
-          <p class="text-gray-600">
-            This may take a few minutes, depending on the number of elements being copied.
-          </p>
-        </div>
-        
-        <div v-else-if="copyCompleted" class="py-4">
-          <div class="text-center mb-8">
-            <div class="flex justify-center mb-4 text-green-500">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <h3 class="text-lg font-medium mb-2">Copy Operation Complete!</h3>
-          </div>
-          
-          <!-- Results summary -->
-          <div v-for="(result, index) in copyResults.targets" :key="index" class="mb-6 p-4 bg-gray-50 rounded-md">
-            <h4 class="font-medium mb-2 text-gray-800">
-              Target: {{ getContainerName(result.targetContainer.containerId) }}
-            </h4>
-            
-            <div v-if="result.status === 'failed'" class="p-3 bg-red-100 text-red-800 rounded-md mb-4">
-              <p class="font-medium">Failed: {{ result.error }}</p>
-            </div>
-            
-            <div v-else>
-              <p class="mb-2">
-                <span class="text-gray-600">Status:</span>
-                <span
-                  class="ml-2 px-2 inline-flex text-xs leading-5 font-semibold rounded-full"
-                  :class="{
-                    'bg-green-100 text-green-800': !result.errors,
-                    'bg-yellow-100 text-yellow-800': result.errors && result.errors.length > 0
-                  }"
-                >
-                  {{ !result.errors ? 'Success' : 'Partial' }}
-                </span>
-              </p>
-              
-              <p class="text-sm mb-1">
-                <span class="text-gray-600">Elements copied:</span>
-                <span class="ml-2 font-medium">{{ result.elements.copied }} / {{ result.elements.total }}</span>
-              </p>
-              
-              <p class="text-sm">
-                <span class="text-gray-600">Published:</span>
-                <span class="ml-2 font-medium">{{ result.published ? 'Yes' : 'No' }}</span>
-              </p>
-              
-              <div v-if="result.workspacePreserved" class="mt-2 p-3 bg-blue-50 text-blue-800 rounded-md">
-                <p class="text-sm font-medium">🔍 Workspace disponible pour recette</p>
-                <p class="text-xs mt-1">
-                  <template v-if="result.workspaceReused">
-                    Les éléments ont été copiés dans le workspace existant "{{ result.workspace?.name }}".
-                  </template>
-                  <template v-else>
-                    Le workspace "{{ result.workspace?.name }}" a été créé avec les éléments copiés.
-                  </template>
-                  Vous pouvez le consulter dans GTM pour vérification avant publication manuelle.
-                </p>
-              </div>
-              
-              <div v-if="result.errors && result.errors.length > 0" class="mt-4">
-                <p class="text-sm font-medium text-gray-700 mb-2">Errors:</p>
-                <ul class="text-xs text-red-600 space-y-1 pl-4 list-disc">
-                  <li v-for="(error, errorIndex) in result.errors" :key="errorIndex">
-                    {{ error.type }}: {{ error.name ? error.name + ' - ' : '' }}{{ error.error }}
-                  </li>
-                </ul>
-              </div>
-            </div>
-          </div>
-          
-          <div class="flex flex-col md:flex-row md:justify-between space-y-4 md:space-y-0 mt-8">
+        <div v-if="copyInProgress || copyCompleted">
+          <CopyProgress v-if="copyReport" :report="copyReport" />
+          <p v-else class="text-center py-12 text-gray-600">Starting copy…</p>
+
+          <div v-if="copyCompleted" class="flex flex-col md:flex-row md:justify-between space-y-4 md:space-y-0 mt-8">
             <button @click="startNewCopy" class="btn-secondary">
               Start New Copy
             </button>
@@ -772,10 +693,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue';
+import { ref, reactive, computed, onMounted, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
 import { useGtmStore } from '../store/gtm';
 import api from '../services/api';
+import CopyProgress from '../components/CopyProgress.vue';
+import { saveReport } from '../services/copyHistory';
+import { createReport, followCopyJob } from '../services/copyJobRecorder';
 
 const route = useRoute();
 const gtmStore = useGtmStore();
@@ -787,7 +711,7 @@ const loading = ref(false);
 const error = ref(null);
 const copyInProgress = ref(false);
 const copyCompleted = ref(false);
-const copyResults = ref(null);
+const copyReport = ref(null);
 const autoPublish = ref(true); // Par défaut, la publication automatique est activée
 
 // Source selection
@@ -1039,6 +963,16 @@ async function handleWorkspaceChange() {
     ...source.value,
     workspaceName: selectedWorkspace?.name ?? ''
   });
+  dropSourceFromTargets();
+}
+
+function isSourceContainer(target) {
+  return target.accountId === source.value.accountId && target.containerId === source.value.containerId;
+}
+
+function dropSourceFromTargets() {
+  targets.value.filter(isSourceContainer).forEach(target => gtmStore.removeTarget(target));
+  targets.value = targets.value.filter(target => !isSourceContainer(target));
 }
 
 async function handleTargetAccountChange() {
@@ -1204,18 +1138,46 @@ async function performCopy() {
     // Use the API service directly to ensure selections are passed correctly
     const response = await api.gtm.copyElements(
       gtmStore.selectedSource,
-      gtmStore.selectedTargets,
+      gtmStore.selectedTargets.filter(target => !isSourceContainer(target)),
       activeElementTypes,
       filteredSelectedElements,
       deletedElementNames,
       autoPublish.value
     );
 
-    copyResults.value = response.data.result;
-    copyCompleted.value = true;
+    const copyTargets = gtmStore.selectedTargets.filter(target => !isSourceContainer(target));
+    const knownName = containerId => {
+      const name = getContainerName(containerId);
+      return ['Loading...', 'Unknown Container'].includes(name) ? containerId : name;
+    };
+    const report = reactive(createReport({
+      jobId: response.data.jobId,
+      source: {
+        accountId: source.value.accountId,
+        accountName: getAccountName(source.value.accountId),
+        containerId: source.value.containerId,
+        containerName: knownName(source.value.containerId),
+        workspaceId: source.value.workspaceId,
+        workspaceName: getWorkspaceName(source.value.workspaceId)
+      },
+      targets: copyTargets.map(target => ({ accountId: target.accountId, containerId: target.containerId })),
+      containerNames: Object.fromEntries(
+        [source.value.containerId, ...copyTargets.map(target => target.containerId)].map(id => [id, knownName(id)])
+      ),
+      selection: Object.fromEntries(Object.entries(filteredSelectedElements).map(([type, ids]) => [type, ids.length])),
+      deletions: deletedElementNames,
+      autoPublish: autoPublish.value
+    }));
+    copyReport.value = report;
+    saveReport(report).catch(saveError => console.error('Failed to save copy report:', saveError));
+    followCopyJob(report).then(() => {
+      copyInProgress.value = false;
+      copyCompleted.value = true;
+    });
   } catch(err) {
-    error.value = `Copy operation failed: ${err.message}`;
-  } finally {
+    error.value = err.response?.data?.code === 'TARGET_IS_SOURCE_CONTAINER'
+      ? 'The source container cannot be a copy target. Remove it from the targets and try again.'
+      : `Copy operation failed: ${err.message}`;
     copyInProgress.value = false;
   }
 }
@@ -1223,7 +1185,7 @@ async function performCopy() {
 function startNewCopy() {
   gtmStore.resetCopyStatus();
   copyCompleted.value = false;
-  copyResults.value = null;
+  copyReport.value = null;
   currentStep.value = 0;
 }
 
@@ -1268,6 +1230,7 @@ onMounted(async () => {
     // Load previously selected targets
     if (gtmStore.selectedTargets.length > 0) {
       targets.value = [...gtmStore.selectedTargets];
+      dropSourceFromTargets();
     }
     
     // Load previously selected elements

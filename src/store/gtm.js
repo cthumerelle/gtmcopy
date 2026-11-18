@@ -13,8 +13,6 @@ export const useGtmStore = defineStore('gtm', () => {
   const variables = ref([]);
   const clients = ref([]);
   const transformations = ref([]);
-  const copyHistory = ref([]);
-  const copyDetails = ref(null);
   const loading = ref(false);
   const error = ref(null);
   
@@ -247,40 +245,6 @@ export const useGtmStore = defineStore('gtm', () => {
     }
   }
   
-  async function fetchCopyHistory() {
-    loading.value = true;
-    error.value = null;
-    
-    try {
-      const response = await api.gtm.getCopyHistory();
-      copyHistory.value = response.data.history;
-      loading.value = false;
-    } catch (err) {
-      console.error('Fetch copy history error:', err);
-      error.value = 'Failed to fetch copy history';
-      loading.value = false;
-    }
-  }
-  
-  async function fetchCopyDetails(id) {
-    if (!id) return;
-    
-    loading.value = true;
-    error.value = null;
-    copyDetails.value = null;
-    
-    try {
-      const response = await api.gtm.getCopyDetails(id);
-      copyDetails.value = response.data.details;
-      loading.value = false;
-      return response.data.details;
-    } catch (err) {
-      console.error('Fetch copy details error:', err);
-      error.value = 'Failed to fetch copy operation details';
-      loading.value = false;
-    }
-  }
-  
   async function fetchSourceElements() {
     if (!selectedSource.value.accountId ||
         !selectedSource.value.containerId ||
@@ -425,8 +389,6 @@ export const useGtmStore = defineStore('gtm', () => {
     variables,
     clients,
     transformations,
-    copyHistory,
-    copyDetails,
     loading,
     error,
     selectedSource,
@@ -452,8 +414,6 @@ export const useGtmStore = defineStore('gtm', () => {
     fetchVariables,
     fetchClients,
     fetchTransformations,
-    fetchCopyHistory,
-    fetchCopyDetails,
     fetchSourceElements,
     fetchWorkspaceStatus,
     setSelectedSource,
