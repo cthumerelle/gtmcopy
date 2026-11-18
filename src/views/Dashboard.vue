@@ -126,7 +126,7 @@
       </div>
       
       <!-- Recent copy history -->
-      <div v-if="gtmStore.copyHistory.length > 0" class="mb-8">
+      <div v-if="recentHistory.length > 0" class="mb-8">
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-xl font-semibold text-gray-800">Recent Copy Operations</h2>
           <router-link to="/history" class="text-primary-600 hover:text-primary-900 text-sm">View All</router-link>
@@ -144,18 +144,23 @@
               </tr>
             </thead>
             <tbody class="bg-white divide-y divide-gray-200">
-              <tr v-for="(item, index) in recentHistory" :key="index">
+              <tr
+                v-for="item in recentHistory"
+                :key="item.id"
+                class="hover:bg-gray-50 cursor-pointer"
+                @click="router.push({ name: 'history-report', params: { id: item.id } })"
+              >
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                   {{ formatDate(item.createdAt) }}
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {{ shortenId(item.sourceContainer) }}
+                  {{ item.source?.containerName }}
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {{ shortenId(item.destContainer) }}
+                  {{ item.targetNames }}
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                  {{ item.elementCount }}
+                  {{ item.totals.ok + item.totals.deleted }}<span v-if="item.totals.failed" class="ml-2 text-red-700">{{ item.totals.failed }} failed</span>
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap">
                   <span
@@ -181,10 +186,14 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import { useAuthStore } from '../store/auth';
+import { useRouter } from 'vue-router';
 import { useGtmStore } from '../store/gtm';
+import { listReports } from '../services/copyHistory';
+import { summarizeCopy } from '../utils/copyReport';
 
 const authStore = useAuthStore();
 const gtmStore = useGtmStore();
+const router = useRouter();
 
 // User data
 const user = computed(() => authStore.user);
@@ -192,10 +201,7 @@ const user = computed(() => authStore.user);
 // Control display of GTM accounts
 const showAccounts = ref(false);
 
-// Computed for recent history
-const recentHistory = computed(() => {
-  return gtmStore.copyHistory.slice(0, 5);
-});
+const recentHistory = ref([]);
 
 // Format date helper
 function formatDate(dateString) {
@@ -211,18 +217,6 @@ function formatDate(dateString) {
   }).format(date);
 }
 
-// Shorten container ID for display
-function shortenId(id) {
-  if (!id) return 'N/A';
-  
-  // If ID is longer than 10 characters, truncate it
-  if (id.length > 10) {
-    return `${id.substring(0, 5)}...${id.substring(id.length - 5)}`;
-  }
-  
-  return id;
-}
-
 // Fetch GTM accounts and show them
 async function fetchAndShowAccounts() {
   if (gtmStore.accounts.length === 0) {
@@ -232,8 +226,20 @@ async function fetchAndShowAccounts() {
   showAccounts.value = true;
 }
 
-// On mount, fetch copy history for the dashboard
 onMounted(async () => {
-  await gtmStore.fetchCopyHistory();
+  try {
+    const reports = (await listReports()).slice(0, 5);
+    recentHistory.value = reports.map(report => {
+      const summary = summarizeCopy(report.events || [], { streamLost: report.status === 'incomplete' });
+      return {
+        ...report,
+        status: report.status === 'running' ? 'running' : summary.status,
+        totals: summary.totals,
+        targetNames: (report.targets || []).map(t => report.containerNames?.[t.containerId] || t.containerId).join(', ')
+      };
+    });
+  } catch (err) {
+    console.error('Failed to load recent copies:', err);
+  }
 });
 </script>

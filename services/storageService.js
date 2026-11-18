@@ -6,7 +6,6 @@
 // Storage keys
 const STORAGE_KEYS = {
   USERS: 'gtm_copy_users',
-  COPY_HISTORY: 'gtm_copy_history',
   USER_SETTINGS: 'gtm_copy_settings',
 };
 
@@ -61,59 +60,6 @@ export const updateUser = (googleUserId, userData) => {
   }
 };
 
-// Copy history functions
-export const getCopyHistory = (googleUserId) => {
-  try {
-    const historyData = localStorage.getItem(STORAGE_KEYS.COPY_HISTORY);
-    const allHistory = historyData ? JSON.parse(historyData) : {};
-    
-    // Get user-specific history or empty array
-    return allHistory[googleUserId] || [];
-  } catch (error) {
-    console.error('Error getting copy history from localStorage:', error);
-    return [];
-  }
-};
-
-export const addCopyHistory = (googleUserId, historyItem) => {
-  try {
-    const historyData = localStorage.getItem(STORAGE_KEYS.COPY_HISTORY);
-    const allHistory = historyData ? JSON.parse(historyData) : {};
-    
-    // Get user history or initialize empty array
-    const userHistory = allHistory[googleUserId] || [];
-    
-    // Add new item with ID and timestamp
-    const newItem = {
-      id: Date.now().toString(),
-      createdAt: new Date().toISOString(),
-      ...historyItem,
-    };
-    
-    // Add to beginning of array (newest first)
-    userHistory.unshift(newItem);
-    
-    // Update storage
-    allHistory[googleUserId] = userHistory;
-    localStorage.setItem(STORAGE_KEYS.COPY_HISTORY, JSON.stringify(allHistory));
-    
-    return newItem;
-  } catch (error) {
-    console.error('Error adding copy history to localStorage:', error);
-    return null;
-  }
-};
-
-export const getCopyDetail = (googleUserId, copyId) => {
-  try {
-    const userHistory = getCopyHistory(googleUserId);
-    return userHistory.find(item => item.id === copyId);
-  } catch (error) {
-    console.error('Error getting copy detail from localStorage:', error);
-    return null;
-  }
-};
-
 // User settings functions
 export const getUserSettings = (googleUserId) => {
   try {
@@ -162,7 +108,6 @@ if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
   
   const inMemoryStorage = {
     [STORAGE_KEYS.USERS]: {},
-    [STORAGE_KEYS.COPY_HISTORY]: {},
     [STORAGE_KEYS.USER_SETTINGS]: {},
   };
   

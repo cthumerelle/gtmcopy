@@ -1,6 +1,7 @@
 import express from 'express';
 import { authenticate } from '../middlewares/auth.js';
 import * as gtmService from '../services/gtmService.js';
+import { createJob, getJob, finishJob, runInJob } from '../services/copyJobs.js';
 
 const router = express.Router();
 
@@ -180,6 +181,10 @@ router.post('/copy', authenticate, async (req, res) => {
     if (!targets || !Array.isArray(targets) || targets.length === 0) {
       return res.status(400).json({ message: 'At least one target container is required' });
     }
+
+    if (targets.some(target => target.accountId === source.accountId && target.containerId === source.containerId)) {
+      return res.status(400).json({ code: 'TARGET_IS_SOURCE_CONTAINER', containerId: source.containerId });
+    }
     
     const hasElementTypes = elementTypes && Array.isArray(elementTypes) && elementTypes.length > 0;
     const hasDeletions = deletedElementNames
@@ -190,53 +195,70 @@ router.post('/copy', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'At least one element to copy or delete is required' });
     }
     
-    // Perform the copy operation
-    const result = await gtmService.copyElements(
+    const job = createJob(req.user.googleUserId);
+    runInJob(job, () => gtmService.copyElements(
       req.user.googleUserId,
       source,
       targets,
       elementTypes,
-      selectedElements, // Pass the selected element IDs
+      selectedElements,
       deletedElementNames,
-      autoPublish // Pass the auto-publish option
-    );
-    
-    res.status(200).json({ result });
+      autoPublish
+    ))
+      .then(result => finishJob(job, 'done', 'JOB_DONE', { result }))
+      .catch(error => {
+        console.error('Error copying GTM elements:', error);
+        finishJob(job, 'failed', 'JOB_FAILED', { apiMessage: error.message });
+      });
+
+    res.status(202).json({ jobId: job.id });
   } catch (error) {
-    console.error('Error copying GTM elements:', error);
-    res.status(500).json({ message: 'Failed to copy GTM elements', error: error.message });
+    console.error('Error starting GTM copy:', error);
+    res.status(500).json({ message: 'Failed to start GTM copy', error: error.message });
   }
 });
 
 /**
- * @route   GET /api/gtm/history
- * @desc    Get copy history for the user
+ * @route   GET /api/gtm/copy/:jobId/events
+ * @desc    Stream copy progress events (Server-Sent Events)
  * @access  Private
  */
-router.get('/history', authenticate, async (req, res) => {
-  try {
-    const history = await gtmService.getCopyHistory(req.user.googleUserId);
-    res.status(200).json({ history });
-  } catch (error) {
-    console.error('Error fetching copy history:', error);
-    res.status(500).json({ message: 'Failed to fetch copy history', error: error.message });
+router.get('/copy/:jobId/events', authenticate, (req, res) => {
+  const job = getJob(req.params.jobId);
+  if (!job || job.googleUserId !== req.user.googleUserId) {
+    return res.status(404).json({ code: 'COPY_JOB_NOT_FOUND' });
   }
-});
 
-/**
- * @route   GET /api/gtm/history/:id
- * @desc    Get details of a specific copy operation
- * @access  Private
- */
-router.get('/history/:id', authenticate, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const details = await gtmService.getCopyDetails(req.user.googleUserId, id);
-    res.status(200).json({ details });
-  } catch (error) {
-    console.error('Error fetching copy details:', error);
-    res.status(500).json({ message: 'Failed to fetch copy details', error: error.message });
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+  res.flushHeaders();
+
+  const send = event => res.write(`id: ${event.id}\nevent: progress\ndata: ${JSON.stringify(event)}\n\n`);
+  const lastEventId = Number(req.get('Last-Event-ID')) || Number(req.query.after) || 0;
+  job.events.filter(event => event.id > lastEventId).forEach(send);
+
+  if (job.status !== 'running') {
+    return res.end();
   }
+
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 15000);
+  const listener = event => {
+    send(event);
+    if (event.type === 'JOB_DONE' || event.type === 'JOB_FAILED') {
+      clearInterval(heartbeat);
+      res.end();
+    }
+  };
+  job.listeners.add(listener);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    job.listeners.delete(listener);
+  });
 });
 
 export default router;

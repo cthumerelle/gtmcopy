@@ -1,7 +1,8 @@
 import { google } from 'googleapis';
 import * as googleAuth from './googleAuth.js';
-import { getCopyHistory, addCopyHistory, getCopyDetail } from './storageService.js';
 import rateLimiter from './rateLimiter.js';
+import { emitProgress, currentEmitter } from './copyJobs.js';
+import { planFolderMapping, withTargetFolder } from './folderMapping.js';
 
 /**
  * Simple cache for templates to avoid redundant API calls
@@ -281,8 +282,8 @@ const getTagManagerClient = async (googleUserId) => {
  * @param {string} description - Description of the request for logging
  * @returns {Promise} - Promise that resolves with the request result
  */
-const makeRateLimitedRequest = async (requestFunction, description) => {
-  return await rateLimiter.enqueue(requestFunction, description);
+const makeRateLimitedRequest = async (requestFunction, description, options) => {
+  return await rateLimiter.enqueue(requestFunction, description, options);
 };
 
 /**
@@ -330,9 +331,12 @@ const getContainers = async (googleUserId, accountId) => {
 const getWorkspaces = async (googleUserId, accountId, containerId) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
-    const response = await tagmanager.accounts.containers.workspaces.list({
-      parent: `accounts/${accountId}/containers/${containerId}`
-    });
+    const response = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.list({
+        parent: `accounts/${accountId}/containers/${containerId}`
+      }),
+      `List workspaces`
+    );
     return response.data.workspace || [];
   } catch (error) {
     console.error('Error fetching GTM workspaces:', error);
@@ -523,6 +527,47 @@ const getTriggers = async (googleUserId, accountId, containerId, workspaceId) =>
   }
 };
 
+const getFolders = async (googleUserId, workspacePath) => {
+  const tagmanager = await getTagManagerClient(googleUserId);
+  const response = await makeRateLimitedRequest(
+    () => tagmanager.accounts.containers.workspaces.folders.list({ parent: workspacePath }),
+    `Get folders for ${workspacePath}`
+  );
+  return response.data.folder || [];
+};
+
+const resolveTargetFolders = async (googleUserId, sourceFolders, sourceElements, targetPath, containerId) => {
+  const errors = [];
+  if (sourceFolders.length === 0) return { folderMap: {}, errors };
+
+  const destFolders = await getFolders(googleUserId, targetPath);
+  const { folderMap, foldersToCreate } = planFolderMapping(sourceFolders, sourceElements, destFolders);
+  sourceFolders
+    .filter(folder => folderMap[folder.folderId])
+    .forEach(folder => emitProgress('FOLDER_REUSED', { containerId, name: folder.name }));
+  if (foldersToCreate.length === 0) return { folderMap, errors };
+
+  const tagmanager = await getTagManagerClient(googleUserId);
+  for (const folder of foldersToCreate) {
+    try {
+      const response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.folders.create({
+          parent: targetPath,
+          requestBody: { name: folder.name }
+        }),
+        `Create folder "${folder.name}"`
+      );
+      folderMap[folder.folderId] = response.data.folderId;
+      emitProgress('FOLDER_CREATED', { containerId, name: folder.name });
+    } catch (error) {
+      console.error(`Error creating folder "${folder.name}":`, error);
+      emitProgress('FOLDER_FAILED', { containerId, name: folder.name, ...describeApiError(error) });
+      errors.push({ type: 'folder', name: folder.name, error: error.message });
+    }
+  }
+  return { folderMap, errors };
+};
+
 /**
  * Get all variables in a workspace
  * @param {string} googleUserId - Google user ID
@@ -683,9 +728,12 @@ const copyTransformation = async (googleUserId, transformation, targetPath, tagM
     const tagmanager = await getTagManagerClient(googleUserId);
     
     // First, get all transformations in the target workspace to check for duplicates
-    const existingTransformationsResponse = await tagmanager.accounts.containers.workspaces.transformations.list({
-      parent: targetPath
-    });
+    const existingTransformationsResponse = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.transformations.list({
+        parent: targetPath
+      }),
+      `List transformations`
+    );
     
     const existingTransformations = existingTransformationsResponse.data.transformation || [];
     const existingTransformation = existingTransformations.find(t => t.name === transformation.name);
@@ -720,6 +768,7 @@ const copyTransformation = async (googleUserId, transformation, targetPath, tagM
       // Keep the existing transformation's ID and fingerprint
       const transformationPath = `${targetPath}/transformations/${existingTransformation.transformationId}`;
       transformationCopy.fingerprint = existingTransformation.fingerprint;
+      if (!transformationCopy.parentFolderId && existingTransformation.parentFolderId) transformationCopy.parentFolderId = existingTransformation.parentFolderId;
       
       response = await makeRateLimitedRequest(
         () => tagmanager.accounts.containers.workspaces.transformations.update({
@@ -802,6 +851,7 @@ const copyClient = async (googleUserId, client, targetPath, templateMap = {}, so
       console.log(`Client with name "${client.name}" already exists. Updating.`);
       const clientPath = `${targetPath}/clients/${existingClient.clientId}`;
       clientCopy.fingerprint = existingClient.fingerprint;
+      if (!clientCopy.parentFolderId && existingClient.parentFolderId) clientCopy.parentFolderId = existingClient.parentFolderId;
 
       response = await makeRateLimitedRequest(
         () => tagmanager.accounts.containers.workspaces.clients.update({
@@ -829,101 +879,17 @@ const copyClient = async (googleUserId, client, targetPath, templateMap = {}, so
   }
 };
 
-/**
- * Get copy history for a user
- * @param {string} googleUserId - Google user ID
- * @returns {Array} - Copy history
- */
-const getHistory = async (googleUserId) => {
-  try {
-    // Get history from local storage
-    return getCopyHistory(googleUserId);
-  } catch (error) {
-    console.error('Error fetching copy history:', error);
-    throw error;
-  }
-};
+const isWorkspaceAlreadySubmitted = (error) =>
+  error.response?.status === 400
+  && (error.response?.data?.error?.message || error.message || '').toLowerCase().includes('already submitted');
 
-/**
- * Get details for a specific copy operation
- * @param {string} googleUserId - Google user ID
- * @param {string} copyId - Copy history ID
- * @returns {Object} - Detailed information about the copy operation
- */
-const getDetails = async (googleUserId, copyId) => {
-  try {
-    // Get the copy record from local storage
-    const copyRecord = getCopyDetail(googleUserId, copyId);
-    
-    if (!copyRecord) {
-      throw new Error('Copy record not found or access denied');
-    }
-
-    // Extract details from the message field if it exists
-    let errors = [];
-    if (copyRecord.message) {
-      try {
-        errors = typeof copyRecord.message === 'string' 
-          ? JSON.parse(copyRecord.message) 
-          : copyRecord.message;
-      } catch (e) {
-        console.error('Error parsing copy message:', e);
-        errors = [{ type: 'unknown', error: copyRecord.message }];
-      }
-    }
-    
-    // Get element types that were copied
-    let elementTypes = [];
-    try {
-      elementTypes = typeof copyRecord.elementTypes === 'string'
-        ? JSON.parse(copyRecord.elementTypes)
-        : copyRecord.elementTypes;
-    } catch (e) {
-      console.error('Error parsing element types:', e);
-      elementTypes = copyRecord.elementTypes.split(',');
-    }
-    
-    // For successful or partial operations, fetch the elements that were copied
-    // This would typically come from the temporary workspace before it was deleted
-    // Since we don't store the actual copied elements in the database, 
-    // we'll provide summary information based on what we have
-    
-    const copiedItemsSummary = {
-      successful: copyRecord.elementCount,
-      failed: errors.length,
-      elementTypes: elementTypes,
-      // We can provide a breakdown by type based on the error messages
-      byType: elementTypes.map(type => {
-        const typeErrors = errors.filter(e => e.type === type);
-        return {
-          type,
-          total: 0, // We don't know the actual count per type
-          failed: typeErrors.length,
-          // We can list the failed items by name if available
-          failedItems: typeErrors.map(e => e.name).filter(Boolean)
-        };
-      })
-    };
-    
-    return {
-      id: copyRecord.id,
-      date: copyRecord.createdAt,
-      source: {
-        accountId: copyRecord.sourceAccount,
-        containerId: copyRecord.sourceContainer,
-        workspaceId: copyRecord.sourceWorkspace
-      },
-      destination: {
-        containerId: copyRecord.destContainer
-      },
-      status: copyRecord.status,
-      elements: copiedItemsSummary,
-      errors: errors.length > 0 ? errors : null
-    };
-  } catch (error) {
-    console.error('Error fetching copy details:', error);
-    throw error;
-  }
+const findVersionByName = async (tagmanager, accountId, containerId, versionName) => {
+  const response = await tagmanager.accounts.containers.version_headers.list({
+    parent: `accounts/${accountId}/containers/${containerId}`
+  });
+  const headers = (response.data.containerVersionHeader || [])
+    .filter(header => header.name === versionName && !header.deleted);
+  return headers.sort((a, b) => Number(b.containerVersionId) - Number(a.containerVersionId))[0] || null;
 };
 
 /**
@@ -952,18 +918,50 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
       ? `Published by GTM Copy application from workspace "${sourceWorkspaceName}"`
       : 'Published by GTM Copy application';
 
-    // Step 1: Create a version from the workspace
-    const versionResponse = await makeRateLimitedRequest(
-      () => tagmanager.accounts.containers.workspaces.create_version({
-        path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`,
-        requestBody: {
-          name: versionName,
-          notes: versionNotes
-        }
-      }),
-      `Create version in container ${containerId}`
-    );
-    
+    const emit = currentEmitter();
+    emit('PUBLISH_STEP', { containerId, step: 'CREATE_VERSION' });
+    let createAttempt = 0;
+    let versionResponse;
+    try {
+      versionResponse = await makeRateLimitedRequest(
+        async () => {
+          createAttempt++;
+          if (createAttempt > 1) {
+            const existingVersion = await findVersionByName(tagmanager, accountId, containerId, versionName);
+            if (existingVersion) {
+              console.log(`Version "${existingVersion.containerVersionId}" already created by a previous attempt.`);
+              emit('VERSION_RECOVERED', { containerId, versionId: existingVersion.containerVersionId });
+              return { data: { containerVersion: existingVersion } };
+            }
+          }
+          return tagmanager.accounts.containers.workspaces.create_version({
+            path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`,
+            requestBody: {
+              name: versionName,
+              notes: versionNotes
+            }
+          });
+        },
+        `Create version in container ${containerId}`,
+        { operation: 'CREATE_VERSION', containerId }
+      );
+    } catch (error) {
+      if (!isWorkspaceAlreadySubmitted(error)) throw error;
+
+      console.warn(`Workspace "${workspaceId}" already submitted, looking up version "${versionName}".`);
+      const existingVersion = await makeRateLimitedRequest(
+        () => findVersionByName(tagmanager, accountId, containerId, versionName),
+        `List versions in container ${containerId}`
+      );
+      if (!existingVersion) {
+        error.workspaceConsumed = true;
+        throw error;
+      }
+      console.log(`Recovered version "${existingVersion.containerVersionId}" created by a previous attempt.`);
+      emit('VERSION_RECOVERED', { containerId, versionId: existingVersion.containerVersionId });
+      versionResponse = { data: { containerVersion: existingVersion } };
+    }
+
     console.log('Version created successfully:', {
       versionId: versionResponse.data?.containerVersion?.containerVersionId,
       name: versionResponse.data?.containerVersion?.name,
@@ -978,6 +976,7 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
       
       const error = new Error('Version creation failed due to compiler errors');
       error.compilerError = true;
+      error.workspaceConsumed = true;
       error.responseData = versionResponse.data;
       throw error;
     }
@@ -989,12 +988,35 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
     }
     
     console.log(`Publishing version ${versionId} to production...`);
-    const publishResponse = await makeRateLimitedRequest(
-      () => tagmanager.accounts.containers.versions.publish({
-        path: `accounts/${accountId}/containers/${containerId}/versions/${versionId}`
-      }),
-      `Publish version ${versionId} to production`
-    );
+    emit('PUBLISH_STEP', { containerId, step: 'PUBLISH_VERSION', versionId });
+    let publishAttempt = 0;
+    let publishResponse;
+    try {
+      publishResponse = await makeRateLimitedRequest(
+        async () => {
+          publishAttempt++;
+          if (publishAttempt > 1) {
+            const live = await tagmanager.accounts.containers.versions.live({
+              parent: `accounts/${accountId}/containers/${containerId}`
+            });
+            if (live.data?.containerVersionId === versionId) {
+              console.log(`Version "${versionId}" is already live, publish succeeded on a previous attempt.`);
+              emit('PUBLISH_CONFIRMED', { containerId, versionId });
+              return { data: { containerVersion: live.data } };
+            }
+          }
+          return tagmanager.accounts.containers.versions.publish({
+            path: `accounts/${accountId}/containers/${containerId}/versions/${versionId}`
+          });
+        },
+        `Publish version ${versionId} to production`,
+        { operation: 'PUBLISH_VERSION', containerId }
+      );
+    } catch (error) {
+      error.workspaceConsumed = true;
+      error.versionId = versionId;
+      throw error;
+    }
     
     console.log('Version published to production successfully');
     
@@ -1025,6 +1047,10 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
     // Rethrow with enhanced message
     const enhancedError = new Error(errorMessage);
     enhancedError.originalError = error;
+    enhancedError.response = error.response;
+    enhancedError.compilerError = error.compilerError;
+    enhancedError.workspaceConsumed = error.workspaceConsumed || isWorkspaceAlreadySubmitted(error);
+    enhancedError.versionId = error.versionId;
     throw enhancedError;
   }
 };
@@ -1032,16 +1058,16 @@ const publishWorkspace = async (googleUserId, accountId, containerId, workspaceI
 /**
  * Copy template to target workspace with duplicate checking
  */
-const copyTemplate = async (googleUserId, template, targetPath) => {
+const copyTemplate = async (googleUserId, template, targetPath, knownTemplates = null) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
     
-    // First, check for existing template with same name
-    const existingTemplatesResponse = await tagmanager.accounts.containers.workspaces.templates.list({
-      parent: targetPath
-    });
-    
-    const existingTemplates = existingTemplatesResponse.data.template || [];
+    const existingTemplates = knownTemplates || (await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.templates.list({
+        parent: targetPath
+      }),
+      `List templates`
+    )).data.template || [];
     const existingTemplate = existingTemplates.find(t => t.name === template.name);
     
     // Make a clean copy of just essential fields to prevent ID conflicts
@@ -1089,6 +1115,12 @@ const copyTemplate = async (googleUserId, template, targetPath) => {
       const containerId = pathParts[3];
       const workspaceId = pathParts[5];
       invalidateTemplateCache(accountId, containerId, workspaceId);
+    }
+
+    if (knownTemplates) {
+      const index = knownTemplates.findIndex(t => t.templateId === response.data.templateId);
+      if (index >= 0) knownTemplates[index] = response.data;
+      else knownTemplates.push(response.data);
     }
     
     return response.data;
@@ -1182,9 +1214,12 @@ const copyTrigger = async (googleUserId, trigger, targetPath) => {
     const tagmanager = await getTagManagerClient(googleUserId);
     
     // First, get all triggers in the target workspace to check for duplicates
-    const existingTriggersResponse = await tagmanager.accounts.containers.workspaces.triggers.list({
-      parent: targetPath
-    });
+    const existingTriggersResponse = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.triggers.list({
+        parent: targetPath
+      }),
+      `List triggers`
+    );
     
     const existingTriggers = existingTriggersResponse.data.trigger || [];
     const existingTrigger = existingTriggers.find(t => t.name === trigger.name);
@@ -1204,6 +1239,7 @@ const copyTrigger = async (googleUserId, trigger, targetPath) => {
     if (trigger.checkValidation) triggerCopy.checkValidation = trigger.checkValidation;
     if (trigger.waitForTagsTimeout) triggerCopy.waitForTagsTimeout = trigger.waitForTagsTimeout;
     if (trigger.notes) triggerCopy.notes = trigger.notes;
+    if (trigger.parentFolderId) triggerCopy.parentFolderId = trigger.parentFolderId;
     
     let response;
     
@@ -1214,18 +1250,25 @@ const copyTrigger = async (googleUserId, trigger, targetPath) => {
       // Keep the existing trigger's ID and fingerprint
       const triggerPath = `${targetPath}/triggers/${existingTrigger.triggerId}`;
       triggerCopy.fingerprint = existingTrigger.fingerprint;
+      if (!triggerCopy.parentFolderId && existingTrigger.parentFolderId) triggerCopy.parentFolderId = existingTrigger.parentFolderId;
       
-      response = await tagmanager.accounts.containers.workspaces.triggers.update({
-        path: triggerPath,
-        requestBody: triggerCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.triggers.update({
+          path: triggerPath,
+          requestBody: triggerCopy
+        }),
+        `Update trigger "${trigger.name}"`
+      );
       console.log(`Updated trigger "${trigger.name}"`);
     } else {
       // Create a new trigger
-      response = await tagmanager.accounts.containers.workspaces.triggers.create({
-        parent: targetPath,
-        requestBody: triggerCopy
-      });
+      response = await makeRateLimitedRequest(
+        () => tagmanager.accounts.containers.workspaces.triggers.create({
+          parent: targetPath,
+          requestBody: triggerCopy
+        }),
+        `Create trigger "${trigger.name}"`
+      );
       console.log(`Created new trigger "${trigger.name}"`);
     }
     
@@ -1253,9 +1296,12 @@ const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTe
     const tagmanager = await getTagManagerClient(googleUserId);
     
     // First, get all tags in the target workspace to check for duplicates
-    const existingTagsResponse = await tagmanager.accounts.containers.workspaces.tags.list({
-      parent: targetPath
-    });
+    const existingTagsResponse = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.tags.list({
+        parent: targetPath
+      }),
+      `List tags`
+    );
     
     const existingTags = existingTagsResponse.data.tag || [];
     const existingTag = existingTags.find(t => t.name === tag.name);
@@ -1290,6 +1336,7 @@ const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTe
     if (tag.notes) tagCopy.notes = tag.notes;
     if (tag.priority) tagCopy.priority = tag.priority;
     if (tag.paused) tagCopy.paused = tag.paused;
+    if (tag.parentFolderId) tagCopy.parentFolderId = tag.parentFolderId;
     
     // Map trigger references to destination trigger IDs
     if (triggerMap && sourceTriggers && sourceTriggers.length > 0) {
@@ -1305,6 +1352,7 @@ const copyTag = async (googleUserId, tag, targetPath, templateMap = {}, sourceTe
       // Keep the existing tag's ID and fingerprint
       const tagPath = `${targetPath}/tags/${existingTag.tagId}`;
       tagCopy.fingerprint = existingTag.fingerprint;
+      if (!tagCopy.parentFolderId && existingTag.parentFolderId) tagCopy.parentFolderId = existingTag.parentFolderId;
       
       response = await makeRateLimitedRequest(
         () => tagmanager.accounts.containers.workspaces.tags.update({
@@ -1348,9 +1396,12 @@ const copyVariable = async (googleUserId, variable, targetPath, templateMap = {}
     const tagmanager = await getTagManagerClient(googleUserId);
     
     // First, get all variables in the target workspace to check for duplicates
-    const existingVariablesResponse = await tagmanager.accounts.containers.workspaces.variables.list({
-      parent: targetPath
-    });
+    const existingVariablesResponse = await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.variables.list({
+        parent: targetPath
+      }),
+      `List variables`
+    );
     
     const existingVariables = existingVariablesResponse.data.variable || [];
     const existingVariable = existingVariables.find(v => v.name === variable.name);
@@ -1391,6 +1442,7 @@ const copyVariable = async (googleUserId, variable, targetPath, templateMap = {}
       // Keep the existing variable's ID and fingerprint
       const variablePath = `${targetPath}/variables/${existingVariable.variableId}`;
       variableCopy.fingerprint = existingVariable.fingerprint;
+      if (!variableCopy.parentFolderId && existingVariable.parentFolderId) variableCopy.parentFolderId = existingVariable.parentFolderId;
       
       response = await makeRateLimitedRequest(
         () => tagmanager.accounts.containers.workspaces.variables.update({
@@ -1429,15 +1481,26 @@ const copyVariable = async (googleUserId, variable, targetPath, templateMap = {}
 const deleteWorkspace = async (googleUserId, accountId, containerId, workspaceId) => {
   try {
     const tagmanager = await getTagManagerClient(googleUserId);
-    await tagmanager.accounts.containers.workspaces.delete({
-      path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
-    });
+    await makeRateLimitedRequest(
+      () => tagmanager.accounts.containers.workspaces.delete({
+        path: `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`
+      }),
+      `Delete workspace`
+    );
     return true;
   } catch (error) {
     console.error('Error deleting workspace:', error);
     throw error;
   }
 };
+
+const MAX_PARALLEL_PUBLICATIONS = 3;
+
+const describeApiError = (error) => ({
+  httpStatus: error?.response?.status || null,
+  apiReason: error?.response?.data?.error?.errors?.[0]?.reason || null,
+  apiMessage: error?.response?.data?.error?.message || error?.message || null
+});
 
 /**
  * Copy selected elements from one workspace to another and optionally publish
@@ -1469,12 +1532,10 @@ const copyElements = async (
   console.log('Selected elements:', selectedElements);
   
   // Always get triggers from source workspace for mapping purposes (even if not copying them)
-  const allSourceTriggers = await getTriggers(
-    googleUserId, 
-    source.accountId, 
-    source.containerId, 
-    source.workspaceId
-  );
+  const needsTriggerMapping = elementTypes.includes('tags') || elementTypes.includes('triggers');
+  const allSourceTriggers = needsTriggerMapping
+    ? await getTriggers(googleUserId, source.accountId, source.containerId, source.workspaceId)
+    : [];
   
   // Get elements from source workspace
   if (elementTypes.includes('templates')) {
@@ -1579,40 +1640,59 @@ const copyElements = async (
   }
 
   console.log(`Total elements to copy: ${sourceElements.length}`);
-  
-  // Calculate estimated time and show progress information
-  const estimatedRequestsPerTarget = sourceElements.length + 10; // Elements + workspace creation, templates fetch, etc.
-  const totalEstimatedRequests = estimatedRequestsPerTarget * targets.length;
-  const estimatedTimeMs = rateLimiter.estimateTime(totalEstimatedRequests);
-  const estimatedMinutes = Math.ceil(estimatedTimeMs / 60000);
-  
-  console.log(`Estimated ${totalEstimatedRequests} API requests for ${targets.length} targets`);
-  console.log(`Estimated completion time: ~${estimatedMinutes} minutes`);
-  
-  const rateLimiterStatus = rateLimiter.getStatus();
-  console.log('Rate limiter status:', {
-    queueLength: rateLimiterStatus.queueLength,
-    requestsInLastMinute: rateLimiterStatus.requestsInLastMinute,
-    canMakeRequest: rateLimiterStatus.canMakeRequest
-  });
 
+  const sourceFolders = sourceElements.some(el => el.parentFolderId)
+    ? await getFolders(
+      googleUserId,
+      `accounts/${source.accountId}/containers/${source.containerId}/workspaces/${source.workspaceId}`
+    )
+    : [];
+
+  const deletionCount = Object.values(deletedElementNames || {})
+    .reduce((sum, names) => sum + (Array.isArray(names) ? names.length : 0), 0);
+  emitProgress('JOB_STARTED', {
+    totalTargets: targets.length,
+    elementsPerTarget: sourceElements.length + deletionCount,
+    autoPublish
+  });
+  
   // Hoist tag manager client for deletion phase (avoid repeated auth per target)
   let tagmanager = null;
   if (deletedElementNames) {
     tagmanager = await getTagManagerClient(googleUserId);
   }
 
+  const pendingPublications = new Set();
+
+  const recordTargetFailure = (i, target, error) => {
+    console.error('Error processing target container:', error);
+    emitProgress('TARGET_DONE', {
+      index: i,
+      containerId: target.containerId,
+      status: 'failed',
+      published: false,
+      ...describeApiError(error)
+    });
+    results[i] = {
+      targetContainer: {
+        accountId: target.accountId,
+        containerId: target.containerId
+      },
+      error: error.message,
+      status: 'failed'
+    };
+  };
+
   // Process each target container
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i];
     try {
       console.log(`[${i + 1}/${targets.length}] Starting copy to target container: ${target.containerId}`);
-      
-      // Show current rate limiter status
-      const currentStatus = rateLimiter.getStatus();
-      if (currentStatus.queueLength > 0) {
-        console.log(`Rate limiter queue: ${currentStatus.queueLength} requests pending`);
-      }
+      emitProgress('TARGET_STARTED', {
+        index: i,
+        accountId: target.accountId,
+        containerId: target.containerId
+      });
       
       // Resolve destination workspace: reuse by name or create new
       const { workspace: tempWorkspace, reused: workspaceReused } = await resolveDestinationWorkspace(
@@ -1623,6 +1703,12 @@ const copyElements = async (
       );
 
       const targetPath = `accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`;
+      emitProgress('WORKSPACE_READY', {
+        containerId: target.containerId,
+        workspaceId: tempWorkspace.workspaceId,
+        workspaceName: tempWorkspace.name,
+        reused: workspaceReused
+      });
       const copiedElements = [];
       let errors = [];
 
@@ -1634,12 +1720,13 @@ const copyElements = async (
         source.workspaceId
       );
       
-      const destTemplates = await getCustomTemplates(
+      invalidateTemplateCache(target.accountId, target.containerId, tempWorkspace.workspaceId);
+      const destTemplates = [...await getCustomTemplates(
         googleUserId,
         target.accountId,
         target.containerId,
         tempWorkspace.workspaceId
-      );
+      )];
       
       // Build initial template mapping
       let templateMap = buildTemplateMap(sourceTemplates, destTemplates);
@@ -1660,15 +1747,22 @@ const copyElements = async (
           if (sourceTemplate) {
             try {
               console.log(`Copying required template: ${templateName}`);
-              const result = await copyTemplate(googleUserId, { ...sourceTemplate, elementType: 'template' }, targetPath);
+              const result = await copyTemplate(googleUserId, { ...sourceTemplate, elementType: 'template' }, targetPath, destTemplates);
               
               // Update template map with newly created template
               if (result && result.templateId) {
                 templateMap[templateName] = result.templateId;
                 console.log(`Template "${templateName}" copied with new ID: ${result.templateId}`);
               }
+              emitProgress('DEPENDENCY_OK', { containerId: target.containerId, type: 'template', name: templateName });
             } catch (error) {
               console.error(`Error copying required template ${templateName}:`, error);
+              emitProgress('DEPENDENCY_FAILED', {
+                containerId: target.containerId,
+                type: 'template',
+                name: templateName,
+                ...describeApiError(error)
+              });
               errors.push({
                 type: 'template',
                 name: templateName,
@@ -1680,12 +1774,9 @@ const copyElements = async (
       }
 
       // Trigger mapping phase - get destination triggers (source already fetched)
-      const destTriggers = await getTriggers(
-        googleUserId,
-        target.accountId,
-        target.containerId,
-        tempWorkspace.workspaceId
-      );
+      const destTriggers = needsTriggerMapping
+        ? await getTriggers(googleUserId, target.accountId, target.containerId, tempWorkspace.workspaceId)
+        : [];
       
       // Build initial trigger mapping using pre-fetched source triggers
       let triggerMap = buildTriggerMap(allSourceTriggers, destTriggers);
@@ -1702,6 +1793,20 @@ const copyElements = async (
       // 4. triggers (needed by tags)
       // 5. tags (dependent on the above)
       // 6. transformations (can reference tags, so must be copied after tags)
+      const { folderMap, errors: folderErrors } = await resolveTargetFolders(
+        googleUserId,
+        sourceFolders,
+        sourceElements,
+        targetPath,
+        target.containerId
+      );
+      errors.push(...folderErrors);
+      const targetFolderNames = Object.fromEntries(
+        sourceFolders
+          .filter(folder => folderMap[folder.folderId])
+          .map(folder => [folderMap[folder.folderId], folder.name])
+      );
+
       const orderedElements = [
         ...sourceElements.filter(el => el.elementType === 'template'),
         ...sourceElements.filter(el => el.elementType === 'client'),
@@ -1709,7 +1814,7 @@ const copyElements = async (
         ...sourceElements.filter(el => el.elementType === 'trigger'),
         ...sourceElements.filter(el => el.elementType === 'tag'),
         ...sourceElements.filter(el => el.elementType === 'transformation')
-      ];
+      ].map(el => withTargetFolder(el, folderMap));
 
       console.log(`Copying elements in dependency order. Total elements: ${orderedElements.length}`);
       
@@ -1719,17 +1824,11 @@ const copyElements = async (
         try {
           console.log(`[${i + 1}/${targets.length}] [${j + 1}/${orderedElements.length}] Copying ${element.elementType}: ${element.name}`);
           
-          // Show rate limiter queue status for long operations
-          const queueStatus = rateLimiter.getStatus();
-          if (queueStatus.queueLength > 5) {
-            console.log(`Rate limiter queue: ${queueStatus.queueLength} requests pending, estimated wait: ${Math.ceil(queueStatus.estimatedWaitTime/1000)}s`);
-          }
-          
           let result;
           
           // Update or create elements based on their type
           if (element.elementType === 'template') {
-            result = await copyTemplate(googleUserId, element, targetPath);
+            result = await copyTemplate(googleUserId, element, targetPath, destTemplates);
           } else if (element.elementType === 'variable') {
             result = await copyVariable(googleUserId, element, targetPath, templateMap, sourceTemplates, target.containerId);
           } else if (element.elementType === 'trigger') {
@@ -1761,8 +1860,20 @@ const copyElements = async (
               status: 'success'
             });
           }
+          emitProgress('ELEMENT_OK', {
+            containerId: target.containerId,
+            type: element.elementType,
+            name: element.name,
+            folder: targetFolderNames[result?.parentFolderId ?? element.parentFolderId] || null
+          });
         } catch (error) {
           console.error(`Error copying ${element.elementType} ${element.name}:`, error);
+          emitProgress('ELEMENT_FAILED', {
+            containerId: target.containerId,
+            type: element.elementType,
+            name: element.name,
+            ...describeApiError(error)
+          });
           
           // Provide clearer error messages for common issues
           let errorMessage = error.message;
@@ -1797,156 +1908,181 @@ const copyElements = async (
               } else {
                 console.log(`${type} "${name}" not found in target ${target.containerId}, skipping`);
               }
+              emitProgress('ELEMENT_DELETED', {
+                containerId: target.containerId,
+                type,
+                name,
+                found: !!result
+              });
             } catch (err) {
               console.error(`Error deleting ${type} "${name}":`, err);
+              emitProgress('ELEMENT_FAILED', {
+                containerId: target.containerId,
+                type,
+                name,
+                operation: 'delete',
+                ...describeApiError(err)
+              });
               errors.push({ type, name, error: `Failed to delete: ${err.message}` });
             }
           }
         }
       }
 
-      // Determine if copying succeeded overall
       const copySucceeded = copiedElements.length > 0;
-      
-      // Try to publish changes only if copying succeeded and autoPublish is enabled
-      let publishResult = null;
-      if (copySucceeded && autoPublish) {
-        try {
-          console.log("Attempting to publish workspace changes...");
-          console.log(`Publishing path: accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`);
-          
-          publishResult = await publishWorkspace(
-            googleUserId,
-            target.accountId,
-            target.containerId,
-            tempWorkspace.workspaceId,
-            source.workspaceName
-          );
-          console.log("Publish success:", !!publishResult);
-        } catch (error) {
-          console.error('Error publishing changes:', error);
-          
-          // Provide specific error messages based on error type
-          let errorMessage = error.message;
-          
-          if (error.compilerError) {
-            errorMessage = "Version created but contains compiler errors (missing dependencies: variables, triggers, templates, etc.). Version not published to production.";
-          } else if (error.message.includes("No version ID returned")) {
-            errorMessage = "Failed to create version from workspace. Check workspace content and permissions.";
-          } else if (error.message.includes("Publish version")) {
-            errorMessage = "Version created successfully but failed to publish to production. Check publish permissions.";
-          }
-          if (error.response && error.response.status === 403) {
-            errorMessage = "403 Forbidden: You don't have permission to publish this workspace. This typically means you have 'Edit' access but not 'Publish' access to this container. The elements were copied but you'll need to publish manually through the GTM interface.";
-          } else if (error.message.includes("permission") || error.message.includes("Permission")) {
-            errorMessage = "Insufficient permission to publish changes. You may need to re-authenticate with expanded permissions. The elements were copied but not published.";
-          }
-          
-          errors.push({
-            type: 'publish',
-            error: errorMessage
-          });
-        }
-      } else if (copySucceeded && !autoPublish) {
-        console.log("Skipping publish step as autoPublish is disabled");
-      } else {
-        console.log("Skipping publish step as no elements were copied successfully");
-      }
+      emitProgress('TARGET_COPY_DONE', { index: i, containerId: target.containerId });
 
-      // Record the operation as successful if elements were copied, even if publishing failed
-      const operationStatus = copySucceeded ? (errors.length > 0 ? 'partial' : 'success') : 'failed';
+      const finalizeTarget = async () => {
+        // Try to publish changes only if copying succeeded and autoPublish is enabled
+        let publishResult = null;
+        let workspaceConsumed = false;
+        if (copySucceeded && autoPublish) {
+          emitProgress('PUBLISH_STARTED', { containerId: target.containerId });
+          try {
+            console.log("Attempting to publish workspace changes...");
+            console.log(`Publishing path: accounts/${target.accountId}/containers/${target.containerId}/workspaces/${tempWorkspace.workspaceId}`);
+          
+            publishResult = await publishWorkspace(
+              googleUserId,
+              target.accountId,
+              target.containerId,
+              tempWorkspace.workspaceId,
+              source.workspaceName
+            );
+            console.log("Publish success:", !!publishResult);
+            emitProgress('PUBLISH_DONE', {
+              containerId: target.containerId,
+              versionId: publishResult?.version?.containerVersion?.containerVersionId || null
+            });
+          } catch (error) {
+            console.error('Error publishing changes:', error);
+            workspaceConsumed = !!error.workspaceConsumed;
+            emitProgress('PUBLISH_FAILED', {
+              containerId: target.containerId,
+              code: error.compilerError ? 'COMPILER_ERROR' : (error.versionId ? 'VERSION_NOT_PUBLISHED' : 'VERSION_NOT_CREATED'),
+              versionId: error.versionId || null,
+              ...describeApiError(error.originalError || error)
+            });
+          
+            // Provide specific error messages based on error type
+            let errorMessage = error.message;
+          
+            if (error.compilerError) {
+              errorMessage = "Version created but contains compiler errors (missing dependencies: variables, triggers, templates, etc.). Version not published to production.";
+            } else if (error.message.includes("No version ID returned")) {
+              errorMessage = "Failed to create version from workspace. Check workspace content and permissions.";
+            } else if (error.message.includes("Publish version")) {
+              errorMessage = "Version created successfully but failed to publish to production. Check publish permissions.";
+            }
+            if (error.response && error.response.status === 403) {
+              errorMessage = "403 Forbidden: You don't have permission to publish this workspace. This typically means you have 'Edit' access but not 'Publish' access to this container. The elements were copied but you'll need to publish manually through the GTM interface.";
+            } else if (error.message.includes("permission") || error.message.includes("Permission")) {
+              errorMessage = "Insufficient permission to publish changes. You may need to re-authenticate with expanded permissions. The elements were copied but not published.";
+            }
+          
+            errors.push({
+              type: 'publish',
+              error: errorMessage
+            });
+          }
+        } else if (copySucceeded && !autoPublish) {
+          console.log("Skipping publish step as autoPublish is disabled");
+        } else {
+          console.log("Skipping publish step as no elements were copied successfully");
+        }
+
+        // Record the operation as successful if elements were copied, even if publishing failed
+        const operationStatus = copySucceeded ? (errors.length > 0 ? 'partial' : 'success') : 'failed';
       
-      // Skip cleanup if publishing was successful - publishing a workspace automatically deletes it
-      // Also skip cleanup if autoPublish is disabled and elements were copied successfully
-      if (!publishResult && !(copySucceeded && !autoPublish)) {
-        console.log("Publication didn't succeed. Checking if we need to clean up the temporary workspace...");
+        // Skip cleanup if publishing was successful - publishing a workspace automatically deletes it
+        // Also skip cleanup if autoPublish is disabled and elements were copied successfully
+        if (workspaceConsumed) {
+          console.log("Workspace already turned into a version by GTM, skipping cleanup.");
+        } else if (!publishResult && !(copySucceeded && !autoPublish)) {
+          console.log("Publication didn't succeed. Checking if we need to clean up the temporary workspace...");
         
-        try {
-          console.log("Cleaning up temporary workspace...");
-          await deleteWorkspace(
-            googleUserId, 
-            target.accountId, 
-            target.containerId, 
-            tempWorkspace.workspaceId
-          );
-          console.log("Workspace cleaned up successfully");
-        } catch (deleteError) {
-          console.error('Error deleting workspace:', deleteError);
+          try {
+            console.log("Cleaning up temporary workspace...");
+            await deleteWorkspace(
+              googleUserId, 
+              target.accountId, 
+              target.containerId, 
+              tempWorkspace.workspaceId
+            );
+            console.log("Workspace cleaned up successfully");
+          } catch (deleteError) {
+            console.error('Error deleting workspace:', deleteError);
+            emitProgress('CLEANUP_FAILED', {
+              containerId: target.containerId,
+              workspaceId: tempWorkspace.workspaceId,
+              ...describeApiError(deleteError)
+            });
           
-          // Provide a clearer error message for permission issues
-          let errorMessage = deleteError.message;
-          if (deleteError.response && deleteError.response.status === 403) {
-            errorMessage = "403 Forbidden: You don't have permission to delete this workspace. This workspace will need to be deleted manually through the GTM interface. URL path: " + 
-              `https://tagmanager.google.com/#/container/${target.containerId}/workspaces`;
-          } else if (deleteError.message.includes("permission") || deleteError.message.includes("Permission")) {
-            errorMessage = "Insufficient permission to delete temporary workspace. You may need to re-authenticate with expanded permissions. The workspace will need to be cleaned up manually in the Google Tag Manager interface.";
+            // Provide a clearer error message for permission issues
+            let errorMessage = deleteError.message;
+            if (deleteError.response && deleteError.response.status === 403) {
+              errorMessage = "403 Forbidden: You don't have permission to delete this workspace. This workspace will need to be deleted manually through the GTM interface. URL path: " + 
+                `https://tagmanager.google.com/#/container/${target.containerId}/workspaces`;
+            } else if (deleteError.message.includes("permission") || deleteError.message.includes("Permission")) {
+              errorMessage = "Insufficient permission to delete temporary workspace. You may need to re-authenticate with expanded permissions. The workspace will need to be cleaned up manually in the Google Tag Manager interface.";
+            }
+          
+            // Add to warnings but don't let it affect the operation status
+            errors.push({
+              type: 'cleanup',
+              error: errorMessage
+            });
           }
-          
-          // Add to warnings but don't let it affect the operation status
-          errors.push({
-            type: 'cleanup',
-            error: errorMessage
-          });
+        } else if (publishResult) {
+          console.log("Publication was successful. Workspace was automatically deleted by GTM.");
+        } else if (copySucceeded && !autoPublish) {
+          console.log("Workspace preserved for manual review since autoPublish is disabled.");
         }
-      } else if (publishResult) {
-        console.log("Publication was successful. Workspace was automatically deleted by GTM.");
-      } else if (copySucceeded && !autoPublish) {
-        console.log("Workspace preserved for manual review since autoPublish is disabled.");
-      }
 
-      // Save copy history to local storage
-      addCopyHistory(googleUserId, {
-        sourceAccount: source.accountId,
-        sourceContainer: source.containerId,
-        sourceWorkspace: source.workspaceId,
-        destContainer: target.containerId,
-        elementTypes: elementTypes,
-        elementCount: copiedElements.length,
-        status: operationStatus,
-        message: errors.length > 0 ? errors : null
-      });
 
-      // Add result for this target
-      results.push({
-        targetContainer: {
-          accountId: target.accountId,
-          containerId: target.containerId
-        },
-        workspace: tempWorkspace,
-        workspaceReused,
-        published: publishResult !== null,
-        workspacePreserved: copySucceeded && !autoPublish,
-        elements: {
-          total: sourceElements.length,
+        emitProgress('TARGET_DONE', {
+          index: i,
+          containerId: target.containerId,
+          status: operationStatus,
+          published: publishResult !== null,
           copied: copiedElements.length,
           failed: errors.length
-        },
-        errors: errors.length > 0 ? errors : null
-      });
-    } catch (error) {
-      console.error('Error processing target container:', error);
-      results.push({
-        targetContainer: {
-          accountId: target.accountId,
-          containerId: target.containerId
-        },
-        error: error.message,
-        status: 'failed'
-      });
+        });
 
-      // Save failed history to local storage
-      addCopyHistory(googleUserId, {
-        sourceAccount: source.accountId,
-        sourceContainer: source.containerId,
-        sourceWorkspace: source.workspaceId,
-        destContainer: target.containerId,
-        elementTypes: elementTypes,
-        elementCount: 0,
-        status: 'failed',
-        message: [{ type: 'error', error: error.message }]
-      });
+        results[i] = {
+          targetContainer: {
+            accountId: target.accountId,
+            containerId: target.containerId
+          },
+          workspace: tempWorkspace,
+          workspaceReused,
+          published: publishResult !== null,
+          workspacePreserved: copySucceeded && !autoPublish,
+          elements: {
+            total: sourceElements.length,
+            copied: copiedElements.length,
+            failed: errors.length
+          },
+          errors: errors.length > 0 ? errors : null
+        };
+      };
+
+      const finalization = finalizeTarget().catch(error => recordTargetFailure(i, target, error));
+      if (copySucceeded && autoPublish) {
+        pendingPublications.add(finalization);
+        finalization.finally(() => pendingPublications.delete(finalization));
+        while (pendingPublications.size >= MAX_PARALLEL_PUBLICATIONS) {
+          await Promise.race(pendingPublications);
+        }
+      } else {
+        await finalization;
+      }
+    } catch (error) {
+      recordTargetFailure(i, target, error);
     }
   }
+
+  await Promise.all(pendingPublications);
 
   return {
     source: {
@@ -1956,33 +2092,6 @@ const copyElements = async (
     },
     elementTypes,
     targets: results
-  };
-};
-
-/**
- * Get rate limiter status for UI progress indicators
- * @returns {Object} - Rate limiter status and progress information
- */
-const getRateLimiterStatus = () => {
-  return rateLimiter.getStatus();
-};
-
-/**
- * Estimate time for a copy operation
- * @param {number} elementsCount - Number of elements to copy
- * @param {number} targetsCount - Number of target containers
- * @returns {Object} - Time estimation information
- */
-const estimateCopyTime = (elementsCount, targetsCount) => {
-  const requestsPerTarget = elementsCount + 10; // Elements + overhead
-  const totalRequests = requestsPerTarget * targetsCount;
-  const estimatedMs = rateLimiter.estimateTime(totalRequests);
-  
-  return {
-    totalRequests,
-    estimatedMs,
-    estimatedMinutes: Math.ceil(estimatedMs / 60000),
-    requestsPerTarget
   };
 };
 
@@ -1998,9 +2107,5 @@ export {
   getClients,
   getTransformations,
   copyElements,
-  getHistory as getCopyHistory,
-  getDetails as getCopyDetails,
-  publishWorkspace,
-  getRateLimiterStatus,
-  estimateCopyTime
+  publishWorkspace
 };

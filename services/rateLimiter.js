@@ -1,26 +1,28 @@
+import { currentEmitter } from './copyJobs.js';
+
 /**
- * GTM API Rate Limiter
- * Handles Google Tag Manager API rate limiting (15 requests/minute, 0.25 QPS)
+ * GTM API request queue
+ * Sends requests without anticipating quotas and pauses every request when GTM answers with a quota error
  */
 
 class GTMRateLimiter {
   constructor() {
-    // GTM API limits: 15 requests per minute (0.25 QPS)
-    this.maxRequestsPerMinute = 15;
-    this.maxRequestsPer100Seconds = 25; // Sliding window
+    this.maxConcurrentRequests = 4;
+    this.slowRequestThresholdMs = 20000;
     this.requestQueue = [];
-    this.requestHistory = []; // Track request timestamps
-    this.isProcessing = false;
-    // No retry limits for quota errors - uniform delay for all retries
+    this.activeRequests = 0;
+    this.pausedUntil = 0;
+    this.resumeTimer = null;
   }
 
   /**
    * Add a request to the queue
    * @param {Function} requestFunction - Function that makes the API request
    * @param {string} description - Description for logging
+   * @param {{operation?: 'CREATE_VERSION'|'PUBLISH_VERSION', containerId?: string}} [options]
    * @returns {Promise} - Promise that resolves with the request result
    */
-  async enqueue(requestFunction, description = 'GTM API Request') {
+  async enqueue(requestFunction, description = 'GTM API Request', options = {}) {
     return new Promise((resolve, reject) => {
       this.requestQueue.push({
         requestFunction,
@@ -28,93 +30,36 @@ class GTMRateLimiter {
         resolve,
         reject,
         retryCount: 0,
-        timestamp: Date.now()
+        operation: options.operation || null,
+        containerId: options.containerId || null,
+        timestamp: Date.now(),
+        emit: currentEmitter()
       });
 
       this.processQueue();
     });
   }
 
-  /**
-   * Process the request queue with rate limiting
-   */
-  async processQueue() {
-    if (this.isProcessing || this.requestQueue.length === 0) {
+  processQueue() {
+    const pauseRemaining = this.pausedUntil - Date.now();
+    if (pauseRemaining > 0) {
+      if (!this.resumeTimer) {
+        this.resumeTimer = setTimeout(() => {
+          this.resumeTimer = null;
+          this.processQueue();
+        }, pauseRemaining);
+      }
       return;
     }
 
-    this.isProcessing = true;
-
-    while (this.requestQueue.length > 0) {
-      const now = Date.now();
-      
-      // Clean up old request history (older than 100 seconds)
-      this.requestHistory = this.requestHistory.filter(
-        timestamp => now - timestamp < 100000
-      );
-
-      // Check if we can make a request
-      if (this.canMakeRequest()) {
-        const request = this.requestQueue.shift();
-        await this.executeRequest(request);
-      } else {
-        // Wait before checking again
-        const waitTime = this.getWaitTime();
-        console.log(`Rate limit reached. Waiting ${waitTime}ms before next request...`);
-        await this.sleep(waitTime);
-      }
+    while (this.requestQueue.length > 0 && this.activeRequests < this.maxConcurrentRequests) {
+      const request = this.requestQueue.shift();
+      this.activeRequests++;
+      this.executeRequest(request).finally(() => {
+        this.activeRequests--;
+        this.processQueue();
+      });
     }
-
-    this.isProcessing = false;
-  }
-
-  /**
-   * Check if we can make a request without exceeding rate limits
-   * @returns {boolean}
-   */
-  canMakeRequest() {
-    const now = Date.now();
-    const oneMinuteAgo = now - 60000;
-    const hundredSecondsAgo = now - 100000;
-
-    // Count requests in the last minute
-    const requestsInLastMinute = this.requestHistory.filter(
-      timestamp => timestamp > oneMinuteAgo
-    ).length;
-
-    // Count requests in the last 100 seconds
-    const requestsInLast100Seconds = this.requestHistory.filter(
-      timestamp => timestamp > hundredSecondsAgo
-    ).length;
-
-    return requestsInLastMinute < this.maxRequestsPerMinute && 
-           requestsInLast100Seconds < this.maxRequestsPer100Seconds;
-  }
-
-  /**
-   * Calculate wait time before next request
-   * @returns {number} - Wait time in milliseconds
-   */
-  getWaitTime() {
-    const now = Date.now();
-    const oldestRelevantRequest = this.requestHistory.find(
-      timestamp => now - timestamp < 100000
-    );
-
-    if (!oldestRelevantRequest) {
-      const baseDelay = 1000; // Default 1 second
-      const jitter = Math.random() * 500; // 0-0.5s jitter
-      return baseDelay + jitter;
-    }
-
-    // Wait until we can make the next request
-    const timeSinceOldest = now - oldestRelevantRequest;
-    const baseTimeToWait = Math.max(1000, 100000 - timeSinceOldest + 1000);
-    const cappedTime = Math.min(baseTimeToWait, 10000); // Cap at 10 seconds
-    
-    // Add jitter to avoid thundering herd
-    const jitter = Math.random() * 2000; // 0-2s jitter
-    return cappedTime + jitter;
   }
 
   /**
@@ -123,12 +68,13 @@ class GTMRateLimiter {
    */
   async executeRequest(request) {
     console.log(`🚀 Executing GTM API request: ${request.description}`);
+    const startedAt = Date.now();
     
     try {
       const result = await request.requestFunction();
       
       // Log successful response
-      console.log(`✅ API Success: ${request.description}`);
+      console.log(`✅ API Success: ${request.description} ⏱ ${Date.now() - startedAt}ms`);
       console.log(`📊 Response status: ${result?.status || 'unknown'}`);
       if (result?.config?.url) {
         console.log(`🌐 URL: ${result.config.method?.toUpperCase()} ${result.config.url}`);
@@ -137,13 +83,12 @@ class GTMRateLimiter {
       const filteredData = this.filterResponseData(result.data);
       console.log(`📋 Response data:`, JSON.stringify(filteredData, null, 2));
       
-      // Record successful request
-      this.requestHistory.push(Date.now());
       request.resolve(result);
       
     } catch (error) {
       // Log detailed error information
-      console.log(`❌ API Error: ${request.description}`);
+      const durationMs = Date.now() - startedAt;
+      console.log(`❌ API Error: ${request.description} ⏱ ${durationMs}ms`);
       if (error.config?.url) {
         console.log(`🌐 URL: ${error.config.method?.toUpperCase()} ${error.config.url}`);
       }
@@ -153,7 +98,7 @@ class GTMRateLimiter {
       }
       console.log(`💬 Error Message: ${error.message}`);
       
-      await this.handleRequestError(request, error);
+      await this.handleRequestError(request, error, durationMs);
     }
   }
 
@@ -161,8 +106,9 @@ class GTMRateLimiter {
    * Handle request errors with retry logic
    * @param {Object} request - Request object
    * @param {Error} error - The error that occurred
+   * @param {number} durationMs - Time the failed attempt took
    */
-  async handleRequestError(request, error) {
+  async handleRequestError(request, error, durationMs = 0) {
     const isRecoverable = this.isRecoverableError(error);
     const isQuotaError = this.isQuotaError(error);
     
@@ -177,11 +123,29 @@ class GTMRateLimiter {
 
       console.log(`Request failed (${request.description}). Retrying in ${delay}ms... (Attempt ${request.retryCount})`);
       console.log(`Error: ${error.message}`);
+      request.emit('RETRY_SCHEDULED', {
+        request: request.description,
+        attempt: request.retryCount,
+        maxRetries,
+        httpStatus: error.response?.status || null,
+        reason: this.getRetryReason(request, error, durationMs),
+        operation: request.operation,
+        containerId: request.containerId,
+        durationMs,
+        waitMs: delay,
+        resumeAt: Date.now() + delay
+      });
 
-      await this.sleep(delay);
-      
-      // Re-queue the request
-      this.requestQueue.unshift(request);
+      if (isQuotaError) {
+        this.pausedUntil = Math.max(this.pausedUntil, Date.now() + delay);
+        console.log(`GTM quota exceeded, pausing all requests for ${delay}ms.`);
+        this.requestQueue.unshift(request);
+      } else {
+        setTimeout(() => {
+          this.requestQueue.unshift(request);
+          this.processQueue();
+        }, delay);
+      }
     } else {
       // Log different messages for different failure types
       if (!isRecoverable) {
@@ -199,6 +163,21 @@ class GTMRateLimiter {
       }
       request.reject(error);
     }
+  }
+
+  /**
+   * @param {Object} request
+   * @param {Error} error
+   * @param {number} durationMs
+   * @returns {'QUOTA'|'STILL_PROCESSING'|'SERVER_ERROR'}
+   */
+  getRetryReason(request, error, durationMs) {
+    if (this.isQuotaError(error)) return 'QUOTA';
+    const isGatewayTimeout = [503, 504].includes(error.response?.status);
+    if (request.operation && isGatewayTimeout && durationMs >= this.slowRequestThresholdMs) {
+      return 'STILL_PROCESSING';
+    }
+    return 'SERVER_ERROR';
   }
 
   /**
@@ -265,10 +244,7 @@ class GTMRateLimiter {
    * @returns {number} - Delay in milliseconds
    */
   getRetryDelay() {
-    // Uniform delay for all retry types
-    const baseDelay = 10000; // 10 seconds
-    const jitter = Math.random() * 5000; // Add up to 5s jitter to avoid thundering herd
-    return baseDelay + jitter;
+    return 10000;
   }
 
   /**
@@ -278,70 +254,21 @@ class GTMRateLimiter {
    */
   filterResponseData(data) {
     if (!data || typeof data !== 'object') return data;
-    
-    // Create a deep copy to avoid modifying original data
-    const filtered = JSON.parse(JSON.stringify(data));
-    
-    // Filter templates array
-    if (filtered.template && Array.isArray(filtered.template)) {
-      filtered.template = filtered.template.map(template => ({
-        ...template,
-        templateData: template.templateData ? '[TEMPLATE_DATA_HIDDEN]' : undefined
-      }));
-    }
-    
-    // Filter single template object
-    if (filtered.templateData) {
-      filtered.templateData = '[TEMPLATE_DATA_HIDDEN]';
-    }
-    
-    return filtered;
-  }
-
-  /**
-   * Sleep for specified milliseconds
-   * @param {number} ms - Milliseconds to sleep
-   * @returns {Promise}
-   */
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return JSON.parse(JSON.stringify(data, (key, value) =>
+      key === 'templateData' && value ? '[TEMPLATE_DATA_HIDDEN]' : value
+    ));
   }
 
   /**
    * Get current queue status
-   * @returns {Object} - Status information
+   * @returns {{queueLength: number, activeRequests: number, pausedForMs: number}}
    */
   getStatus() {
-    const now = Date.now();
-    const recentRequests = this.requestHistory.filter(
-      timestamp => now - timestamp < 60000
-    ).length;
-
     return {
       queueLength: this.requestQueue.length,
-      requestsInLastMinute: recentRequests,
-      requestsInLast100Seconds: this.requestHistory.filter(
-        timestamp => now - timestamp < 100000
-      ).length,
-      isProcessing: this.isProcessing,
-      canMakeRequest: this.canMakeRequest(),
-      estimatedWaitTime: this.canMakeRequest() ? 0 : this.getWaitTime()
+      activeRequests: this.activeRequests,
+      pausedForMs: Math.max(0, this.pausedUntil - Date.now())
     };
-  }
-
-  /**
-   * Estimate total time for a given number of requests
-   * @param {number} requestCount - Number of requests
-   * @returns {number} - Estimated time in milliseconds
-   */
-  estimateTime(requestCount) {
-    if (requestCount <= this.maxRequestsPerMinute) {
-      return requestCount * 4000; // 4 seconds per request (safe margin)
-    }
-
-    // For larger batches, calculate based on rate limits
-    const minutes = Math.ceil(requestCount / this.maxRequestsPerMinute);
-    return minutes * 60000; // Convert to milliseconds
   }
 }
 

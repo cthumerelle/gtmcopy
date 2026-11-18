@@ -109,15 +109,9 @@ export default {
     copyElements(source, targets, elementTypes, selectedElements = null, deletedElementNames = null, autoPublish = true) {
       return api.post('/api/gtm/copy', { source, targets, elementTypes, selectedElements, deletedElementNames, autoPublish });
     },
-    
-    // History
-    getCopyHistory() {
-      return api.get('/api/gtm/history');
-    },
-    
-    // Copy details
-    getCopyDetails(id) {
-      return api.get(`/api/gtm/history/${id}`);
+
+    copyEventsUrl(jobId, afterEventId = 0) {
+      return `/api/gtm/copy/${encodeURIComponent(jobId)}/events?after=${Number(afterEventId) || 0}`;
     }
   }
 };
